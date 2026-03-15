@@ -1,0 +1,7 @@
+**/data/
+**/__pycache__/
+*.pyc
+*.flag
+*.txt
+**/*.txt
+lora/__pycache__/
