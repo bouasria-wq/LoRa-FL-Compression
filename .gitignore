@@ -1,4 +1,5 @@
-**/data/
+onlinetest01/data/
+onlinetest02/data/
 **/__pycache__/
 *.pyc
 *.flag
