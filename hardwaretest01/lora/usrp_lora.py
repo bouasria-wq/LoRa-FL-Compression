@@ -37,9 +37,9 @@ FREQ = 915e6    # 915 MHz ISM band
 # Time slots — 5 seconds between each home
 TIME_SLOTS = {
     1: 0,    # Home 1 transmits at t=0s
-    2: 5,    # Home 2 transmits at t=5s
-    3: 10,   # Home 3 transmits at t=10s
-    4: 15,   # Home 4 transmits at t=15s
+    2: 20,    # Home 2 transmits at t=5s
+    3: 40,   # Home 3 transmits at t=10s
+    4: 60,   # Home 4 transmits at t=15s
 }
 
 # Retry config
