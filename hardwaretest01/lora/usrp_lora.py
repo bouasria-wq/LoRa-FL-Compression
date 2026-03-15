@@ -20,11 +20,13 @@ import pickle
 import struct
 
 # ============================================================
-# CONFIG — CHANGE THESE IN LAB
+# CONFIG — reads from config.py
 # ============================================================
-USRP_TYPE   = "x310"           # change to "n310" if needed
-USRP_IP     = "192.168.10.2"   # change to real USRP IP in lab
-SERVER_IP   = "192.168.1.100"  # change to server laptop IP in lab
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import USRP_TYPE, USRP_IP, SERVER_IP, home_ips
+
 SERVER_PORT = 5555
 HOME_PORT   = 5556
 
