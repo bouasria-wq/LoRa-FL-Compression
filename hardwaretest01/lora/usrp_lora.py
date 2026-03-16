@@ -97,7 +97,10 @@ class USRPLoRaInterface:
     def _init_usrp(self):
         """Initialize USRP device."""
         try:
-            args = f"addr={USRP_IP},type={USRP_TYPE}"
+            if USRP_IP:
+                args = f"addr={USRP_IP},type={USRP_TYPE}"
+            else:
+                args = f"type={USRP_TYPE}"
             self.usrp = uhd.usrp.MultiUSRP(args)
 
             self.usrp.set_tx_rate(BW * 8)
@@ -118,7 +121,6 @@ class USRPLoRaInterface:
         except Exception as e:
             print(f"USRP init failed: {e}")
             self.usrp = None
-
     def _modulate_lora(self, data_bytes):
         """Modulate bytes into LoRa chirp signal."""
         bits = np.unpackbits(
@@ -412,7 +414,10 @@ class USRPServer:
     def _init_usrp_rx(self):
         """Initialize USRP RX for SNR measurement."""
         try:
-            args = f"addr={USRP_IP},type={USRP_TYPE}"
+            if USRP_IP:
+                args = f"addr={USRP_IP},type={USRP_TYPE}"
+            else:
+                args = f"type={USRP_TYPE}"
             self.usrp = uhd.usrp.MultiUSRP(args)
             self.usrp.set_rx_rate(BW * 8)
             self.usrp.set_rx_freq(
@@ -532,14 +537,6 @@ class USRPServer:
         Measure real downlink PDR.
         """
         print(f"\nServer Day {day}: Broadcasting to {self.n_homes} homes...")
-
-        # UPDATE THESE IN LAB
-        home_ips = {
-            1: "192.168.1.101",  # laptop 1 IP — change in lab
-            2: "192.168.1.102",  # laptop 2 IP — change in lab
-            3: "192.168.1.103",  # laptop 3 IP — change in lab
-            4: "192.168.1.104",  # laptop 4 IP — change in lab
-        }
 
         data = pickle.dumps({'params': global_params, 'day': day})
         self.downlink_attempted += self.n_homes
