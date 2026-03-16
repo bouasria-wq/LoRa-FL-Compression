@@ -53,7 +53,6 @@ class ServerAggregator:
         print(f"--- SERVER DAY {day_num} ---")
         print(f"{'='*50}")
 
-        # Receive from all homes via LAN
         received = self.usrp_server.receive_all_homes(day_num)
 
         if not received:
@@ -62,23 +61,19 @@ class ServerAggregator:
 
         print(f"Day {day_num}: {len(received)}/{self.n_homes} homes received")
 
-        # Extract params from received packets
         client_params_dict = {}
         zeta_values = {}
 
         for home_id, packet in received.items():
             try:
-                payload = packet.get('payload')
-                if payload is not None:
-                    data = pickle.loads(payload)
-                    params = data.get('params')
-                    if params is not None:
-                        flat = np.concatenate([p.flatten() for p in params])
-                        client_params_dict[home_id] = flat
-                        zeta_values[home_id] = data.get('zeta_i', 0.0)
-                        print(f"Home {home_id}: "
-                              f"{'RF+LAN' if packet.get('rf_success') else 'LAN only'} | "
-                              f"Zeta: {data.get('zeta_i', 0.0):.6f}")
+                params = packet.get('params')
+                if params is not None:
+                    flat = np.concatenate([p.flatten() for p in params])
+                    client_params_dict[home_id] = flat
+                    zeta_values[home_id] = packet.get('zeta_i', 0.0)
+                    print(f"Home {home_id}: "
+                          f"{'RF+LAN' if packet.get('rf_success') else 'LAN only'} | "
+                          f"Zeta: {packet.get('zeta_i', 0.0):.6f}")
             except Exception as e:
                 print(f"Error parsing Home {home_id}: {e}")
 
@@ -86,14 +81,12 @@ class ServerAggregator:
             print("No valid params received!")
             return
 
-        # ME-CFL aggregation
         global_flat = self.server.aggregate_round(client_params_dict, day_num)
 
         if zeta_values:
             avg_zeta = np.mean(list(zeta_values.values()))
             print(f"Avg heterogeneous variance zeta: {avg_zeta:.6f}")
 
-        # Broadcast global model back to all homes via LAN
         self.usrp_server.broadcast_global_model(global_flat, day_num)
         print(f"Global Broadcast Complete for Day {day_num}.")
 
