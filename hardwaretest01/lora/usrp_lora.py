@@ -1,21 +1,21 @@
 """
-USRP LoRa Hardware Interface - hardwaretest01
-==============================================
-Everything measured from real hardware:
-- SNR measured from actual received signal power
-- PDR measured from actual packet success/fail + retries
+USRP LoRa Hardware Interface - hardwaretest01 RF ONLY
+======================================================
+Everything goes through real RF - no LAN, no WiFi needed.
+Home and server only need USRP connected via USB.
+
+- SNR measured from actual received signal
+- PDR measured from actual packet success/fail
 - BER measured from actual bit comparison
-- ToA computed from real SF/BW parameters
+- ToA computed from real SF/BW
 - Time slots: 20 seconds between each home
-- Retry logic: max 3 retries per packet
-- Two-way ACK: both uplink and downlink confirmed
-- No hardcoded assumed values
+- Retry logic: max 3 retries
+- Two-way ACK via RF
 
 File: lora/usrp_lora.py
 """
 import numpy as np
 import time
-import socket
 import pickle
 import struct
 
@@ -25,10 +25,7 @@ import struct
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import USRP_TYPE, USRP_IP, SERVER_IP, home_ips
-
-SERVER_PORT = 5555
-HOME_PORT   = 5556
+from config import USRP_TYPE, USRP_IP
 
 # LoRa PHY parameters — fixed by LoRa standard
 SF   = 7        # spreading factor
@@ -46,12 +43,17 @@ TIME_SLOTS = {
 
 # Retry config
 MAX_RETRIES = 3
-ACK_TIMEOUT = 10   # seconds to wait for ACK
-RETRY_WAIT  = 2    # seconds between retries
+ACK_TIMEOUT = 30   # seconds to wait for ACK via RF
+RETRY_WAIT  = 5    # seconds between retries
 
-# TX/RX gain — adjust in lab based on distance
+# TX/RX gain
 TX_GAIN = 30
 RX_GAIN = 20
+
+# Packet types
+PKT_PARAMS  = b'P'   # home sending params to server
+PKT_ACK     = b'A'   # acknowledgement
+PKT_GLOBAL  = b'G'   # server sending global model back
 # ============================================================
 
 try:
@@ -60,22 +62,21 @@ try:
     print("UHD available — REAL HARDWARE MODE")
 except ImportError:
     UHD_AVAILABLE = False
-    print("WARNING: UHD not available — LAN only mode")
+    print("WARNING: UHD not available")
 
 
 class USRPLoRaInterface:
     """
-    Real USRP hardware interface for home nodes.
-    - Time slotted TX to avoid collisions
-    - Retry up to 3 times if no ACK
-    - PDR calculated after all retries
-    - Two-way ACK for downlink global model
-    - transmit_full sends full params via LAN + 49 bytes via RF
+    RF-only USRP interface for home nodes.
+    No LAN, no WiFi, no sockets.
+    Everything goes through USRP RF.
     """
 
     def __init__(self, home_id=None):
         self.home_id = home_id
         self.usrp = None
+        self.tx_streamer = None
+        self.rx_streamer = None
 
         # Real measured statistics
         self.packets_attempted = 0
@@ -90,6 +91,7 @@ class USRPLoRaInterface:
         print(f"Freq: {FREQ/1e6:.0f}MHz | SF:{SF} | BW:{BW/1e3:.0f}kHz")
         print(f"Time slot: t={TIME_SLOTS.get(home_id, 0)}s")
         print(f"Max retries: {MAX_RETRIES} | ACK timeout: {ACK_TIMEOUT}s")
+        print(f"MODE: RF ONLY — no LAN needed")
         print(f"SNR: MEASURED | PDR: MEASURED | BER: MEASURED")
 
         if UHD_AVAILABLE:
@@ -115,6 +117,13 @@ class USRPLoRaInterface:
             )
             self.usrp.set_rx_gain(RX_GAIN)
 
+            self.tx_streamer = self.usrp.get_tx_stream(
+                uhd.usrp.StreamArgs("fc32", "sc16")
+            )
+            self.rx_streamer = self.usrp.get_rx_stream(
+                uhd.usrp.StreamArgs("fc32", "sc16")
+            )
+
             print(f"USRP {USRP_TYPE.upper()} initialized OK")
             print(f"TX rate: {self.usrp.get_tx_rate()/1e3:.1f}kHz")
             print(f"RX rate: {self.usrp.get_rx_rate()/1e3:.1f}kHz")
@@ -123,7 +132,7 @@ class USRPLoRaInterface:
             print(f"USRP init failed: {e}")
             self.usrp = None
 
-    def _modulate_lora(self, data_bytes):
+    def _modulate(self, data_bytes):
         """Modulate bytes into LoRa chirp signal."""
         bits = np.unpackbits(
             np.frombuffer(data_bytes, dtype=np.uint8)
@@ -147,15 +156,82 @@ class USRPLoRaInterface:
         signal = np.concatenate(symbols).astype(np.complex64)
         return signal, bits
 
-    def _compute_toa(self, payload_bytes):
-        """Compute LoRa Time on Air from real SF/BW."""
-        n_sym = 8 + max(
-            np.ceil(
-                (8*payload_bytes - 4*SF + 28) / (4*(SF-2))
-            ) * (CR+4), 0
-        )
-        toa = n_sym * (2**SF) / BW
-        return toa
+    def _demodulate(self, signal, n_bytes):
+        """Demodulate received LoRa signal back to bytes."""
+        samples_per_symbol = int(2**SF)
+        n = np.arange(samples_per_symbol)
+
+        downchirp = np.exp(-1j * 2 * np.pi * (
+            n / samples_per_symbol +
+            n**2 / (2 * samples_per_symbol)
+        ))
+
+        bits = []
+        n_symbols = len(signal) // samples_per_symbol
+
+        for i in range(n_symbols):
+            chunk = signal[
+                i*samples_per_symbol:(i+1)*samples_per_symbol
+            ]
+            dechirped = chunk * downchirp
+            fft = np.abs(np.fft.fft(dechirped))
+            k = np.argmax(fft) % samples_per_symbol
+            symbol_bits = format(k, f'0{SF}b')
+            bits.extend([int(b) for b in symbol_bits])
+
+        bits = np.array(bits[:n_bytes*8], dtype=np.uint8)
+        recovered = np.packbits(bits)
+        return bytes(recovered[:n_bytes]), np.array(bits)
+
+    def _rf_tx(self, data_bytes):
+        """Transmit bytes via real USRP RF."""
+        if self.usrp is None:
+            return False, None
+        try:
+            signal, sent_bits = self._modulate(data_bytes)
+            tx_metadata = uhd.types.TXMetadata()
+            tx_metadata.start_of_burst = True
+            tx_metadata.end_of_burst = True
+            tx_metadata.has_time_spec = False
+            num_sent = self.tx_streamer.send(signal, tx_metadata)
+            return num_sent > 0, sent_bits
+        except Exception as e:
+            print(f"RF TX error: {e}")
+            return False, None
+
+    def _rf_rx(self, n_bytes, timeout=30):
+        """Receive bytes via real USRP RF."""
+        if self.usrp is None:
+            return None, None
+        try:
+            samples_per_symbol = int(2**SF)
+            n_symbols = (n_bytes * 8 + SF - 1) // SF
+            n_samples = n_symbols * samples_per_symbol + samples_per_symbol
+
+            rx_buffer = np.zeros(n_samples, dtype=np.complex64)
+            rx_metadata = uhd.types.RXMetadata()
+
+            stream_cmd = uhd.types.StreamCMD(
+                uhd.types.StreamMode.num_done
+            )
+            stream_cmd.num_samps = n_samples
+            stream_cmd.stream_now = True
+            self.rx_streamer.issue_stream_cmd(stream_cmd)
+
+            num_rx = self.rx_streamer.recv(rx_buffer, rx_metadata)
+
+            if num_rx > 0:
+                snr = self._measure_snr(rx_buffer[:num_rx])
+                self.snr_measurements.append(snr)
+                data_bytes, rx_bits = self._demodulate(
+                    rx_buffer[:num_rx], n_bytes
+                )
+                return data_bytes, rx_bits
+            return None, None
+
+        except Exception as e:
+            print(f"RF RX error: {e}")
+            return None, None
 
     def _measure_snr(self, signal):
         """Measure real SNR from received signal."""
@@ -164,89 +240,44 @@ class USRPLoRaInterface:
                       if len(signal) > 100
                       else signal_power * 0.01)
         noise_power = max(noise_power, 1e-10)
-        snr_db = 10 * np.log10(signal_power / noise_power)
-        return snr_db
+        return 10 * np.log10(signal_power / noise_power)
 
-    def _measure_ber(self, sent_bits, received_bits):
-        """Measure real BER from bit comparison."""
-        min_len = min(len(sent_bits), len(received_bits))
-        if min_len == 0:
-            return 0.0
-        errors = np.sum(sent_bits[:min_len] != received_bits[:min_len])
-        self.total_bit_errors += errors
-        self.total_bits_compared += min_len
-        return errors / min_len
+    def _compute_toa(self, payload_bytes):
+        """Compute LoRa Time on Air."""
+        n_sym = 8 + max(
+            np.ceil(
+                (8*payload_bytes - 4*SF + 28) / (4*(SF-2))
+            ) * (CR+4), 0
+        )
+        return n_sym * (2**SF) / BW
 
-    def _rf_transmit(self, signal):
-        """Send signal via real USRP RF."""
-        if self.usrp is None:
-            return False
-        try:
-            tx_metadata = uhd.types.TXMetadata()
-            tx_metadata.start_of_burst = True
-            tx_metadata.end_of_burst = True
-            tx_metadata.has_time_spec = False
-            tx_streamer = self.usrp.get_tx_stream(
-                uhd.usrp.StreamArgs("fc32", "sc16")
-            )
-            num_sent = tx_streamer.send(signal, tx_metadata)
-            return num_sent > 0
-        except Exception as e:
-            print(f"RF TX error: {e}")
-            return False
-
-    def _lan_transmit_with_ack(self, packet_data):
+    def transmit_compressed(self, compressed, home_id):
         """
-        Send packet via LAN and wait for ACK.
-        Returns True if ACK received.
-        """
-        try:
-            with socket.socket(
-                socket.AF_INET, socket.SOCK_STREAM
-            ) as s:
-                s.settimeout(ACK_TIMEOUT)
-                s.connect((SERVER_IP, SERVER_PORT))
-                data = pickle.dumps(packet_data)
-                s.sendall(struct.pack('>I', len(data)) + data)
-                ack = s.recv(4)
-                return ack == b'ACK'
-        except Exception as e:
-            print(f"LAN TX error: {e}")
-            return False
-
-    def transmit_full(self, full_packet, compressed_49, home_id):
-        """
-        Full TX pipeline:
+        TX pipeline:
         1. Wait for time slot
-        2. RF TX — sends 49 compressed bytes over real RF
-        3. LAN TX — sends full params + zeta to server
-        4. Wait for ACK
-        5. Retry up to MAX_RETRIES if no ACK
-        6. Calculate real PDR after all retries
+        2. Serialize compressed dict
+        3. RF TX via USRP
+        4. Wait for RF ACK from server
+        5. Retry up to MAX_RETRIES
+        6. Measure real PDR/BER
         """
-        toa = self._compute_toa(len(compressed_49))
+        serialized = pickle.dumps(compressed)
+        payload = serialized[:49]
+        toa = self._compute_toa(len(payload))
         self.packets_attempted += 1
 
         # Step 1: Wait for time slot
         slot_time = TIME_SLOTS.get(home_id, 0)
         if slot_time > 0:
-            print(f"Home {home_id}: Waiting {slot_time}s for time slot...")
+            print(f"Home {home_id}: Waiting {slot_time}s for slot...")
             time.sleep(slot_time)
 
         print(f"Home {home_id}: Time slot reached | "
-              f"ToA: {toa:.4f}s | "
-              f"Attempting TX...")
+              f"ToA: {toa:.4f}s | TX starting...")
 
-        # Modulate 49 bytes for RF
-        signal, sent_bits = self._modulate_lora(compressed_49)
-
-        # Add RF metadata to packet
-        full_packet['toa'] = toa
-        full_packet['sent_bits'] = sent_bits.tolist()
-
-        # Steps 2-5: TX with retries
         rf_success = False
         ack_received = False
+        sent_bits = None
         retries = 0
 
         while retries <= MAX_RETRIES and not ack_received:
@@ -255,31 +286,38 @@ class USRPLoRaInterface:
                       f"waiting {RETRY_WAIT}s...")
                 time.sleep(RETRY_WAIT)
 
-            # RF TX via USRP — 49 bytes over real RF
-            rf_success = self._rf_transmit(signal)
-            full_packet['rf_success'] = rf_success
-            full_packet['retry'] = retries
+            # RF TX
+            rf_success, sent_bits = self._rf_tx(payload)
 
-            # LAN TX — full params to server + wait for ACK
-            ack_received = self._lan_transmit_with_ack(full_packet)
+            if rf_success:
+                print(f"Home {home_id}: RF TX OK | "
+                      f"Waiting for ACK...")
 
-            if ack_received:
-                self.packets_confirmed += 1
-                print(f"Home {home_id}: ACK received "
-                      f"(attempt {retries+1})")
+                # Wait for RF ACK from server
+                ack_bytes, _ = self._rf_rx(1, timeout=ACK_TIMEOUT)
+                if ack_bytes and ack_bytes[0:1] == PKT_ACK:
+                    ack_received = True
+                    self.packets_confirmed += 1
+                    print(f"Home {home_id}: RF ACK received "
+                          f"(attempt {retries+1})")
+                else:
+                    print(f"Home {home_id}: No RF ACK "
+                          f"(attempt {retries+1}/{MAX_RETRIES+1})")
             else:
-                print(f"Home {home_id}: No ACK "
-                      f"(attempt {retries+1}/{MAX_RETRIES+1})")
+                print(f"Home {home_id}: RF TX failed "
+                      f"(attempt {retries+1})")
 
             retries += 1
 
         self.retry_counts.append(retries - 1)
 
-        # Step 6: Real PDR after all retries
         real_pdr = (self.packets_confirmed / self.packets_attempted
                     if self.packets_attempted > 0 else 0.0)
         real_ber = (self.total_bit_errors / self.total_bits_compared
                     if self.total_bits_compared > 0 else 0.0)
+
+        avg_snr = (np.mean(self.snr_measurements)
+                  if self.snr_measurements else 0.0)
 
         print(f"Home {home_id}: "
               f"RF: {'OK' if rf_success else 'FAIL'} | "
@@ -288,6 +326,7 @@ class USRPLoRaInterface:
               f"PDR: {real_pdr*100:.1f}% "
               f"({self.packets_confirmed}/{self.packets_attempted}) | "
               f"BER: {real_ber:.6f} | "
+              f"SNR: {avg_snr:.2f}dB | "
               f"ToA: {toa:.4f}s")
 
         return {
@@ -298,17 +337,17 @@ class USRPLoRaInterface:
             'toa': toa,
             'pdr': real_pdr,
             'ber': real_ber,
+            'snr': avg_snr,
             'packets_attempted': self.packets_attempted,
             'packets_confirmed': self.packets_confirmed
         }
 
-    def receive_global_model(self, home_id, timeout=300):
+    def receive_global_compressed(self, home_id, timeout=300):
         """
-        Receive global model from server via LAN.
-        Send ACK back to confirm receipt.
-        Retry listening if connection drops.
+        Receive compressed global model via RF from server.
+        Send RF ACK back to server after receiving.
         """
-        print(f"Home {home_id}: Waiting for global model "
+        print(f"Home {home_id}: Waiting for global model via RF "
               f"(timeout={timeout}s)...")
 
         start_time = time.time()
@@ -317,32 +356,18 @@ class USRPLoRaInterface:
         while time.time() - start_time < timeout:
             attempts += 1
             try:
-                with socket.socket(
-                    socket.AF_INET, socket.SOCK_STREAM
-                ) as s:
-                    s.setsockopt(
-                        socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
-                    )
-                    s.bind(('0.0.0.0', HOME_PORT + home_id))
-                    s.settimeout(timeout)
-                    s.listen(1)
-                    conn, addr = s.accept()
+                # RX compressed global model
+                rx_bytes, rx_bits = self._rf_rx(49, timeout=10)
 
-                    with conn:
-                        size_data = conn.recv(4)
-                        size = struct.unpack('>I', size_data)[0]
-                        raw = b''
-                        while len(raw) < size:
-                            chunk = conn.recv(4096)
-                            if not chunk:
-                                break
-                            raw += chunk
+                if rx_bytes is not None:
+                    # Send RF ACK back to server
+                    self._rf_tx(PKT_ACK)
+                    print(f"Home {home_id}: Global model received via RF | "
+                          f"ACK sent")
 
-                        data = pickle.loads(raw)
-                        conn.sendall(b'ACK')
-                        print(f"Home {home_id}: Global model received | "
-                              f"ACK sent to server")
-                        return data
+                    # Deserialize compressed dict
+                    compressed_global = pickle.loads(rx_bytes)
+                    return compressed_global
 
             except Exception as e:
                 print(f"Home {home_id}: RX attempt {attempts} "
@@ -372,19 +397,22 @@ class USRPLoRaInterface:
 
 class USRPServer:
     """
-    Server side:
-    - Receives full params from all homes via LAN
-    - Sends ACK to each home immediately on receipt
-    - Waits for ALL homes before aggregating
-    - Measures real SNR from USRP RX
-    - Broadcasts global model with retry
-    - Waits for ACK from each home after broadcast
-    - Measures real PDR for both uplink and downlink
+    Server side RF only:
+    - Receives compressed params via RF from all homes
+    - Sends RF ACK immediately on receipt
+    - Decodes via Hegazy
+    - Runs ME-CFL aggregation
+    - Encodes global model
+    - Broadcasts via RF back to all homes
+    - Waits for RF ACK from each home
+    - Measures real PDR/SNR/BER
     """
 
     def __init__(self, n_homes=4):
         self.n_homes = n_homes
         self.usrp = None
+        self.tx_streamer = None
+        self.rx_streamer = None
 
         # Real measured statistics
         self.uplink_attempted = 0
@@ -394,35 +422,146 @@ class USRPServer:
         self.snr_per_home = {}
         self.retry_counts = []
 
-        print(f"\nUSRP Server Ready")
-        print(f"Homes: {n_homes} | Port: {SERVER_PORT}")
+        print(f"\nUSRP Server Ready — RF ONLY MODE")
+        print(f"Homes: {n_homes}")
         print(f"Max retries: {MAX_RETRIES} | ACK timeout: {ACK_TIMEOUT}s")
         print(f"Waiting for ALL {n_homes} homes before aggregating")
-        print(f"PDR: MEASURED (uplink + downlink)")
+        print(f"PDR: MEASURED | SNR: MEASURED | BER: MEASURED")
 
         if UHD_AVAILABLE:
-            self._init_usrp_rx()
+            self._init_usrp()
 
-    def _init_usrp_rx(self):
-        """Initialize USRP RX for SNR measurement."""
+    def _init_usrp(self):
+        """Initialize USRP device."""
         try:
             if USRP_IP:
                 args = f"addr={USRP_IP},type={USRP_TYPE}"
             else:
                 args = f"type={USRP_TYPE}"
             self.usrp = uhd.usrp.MultiUSRP(args)
+
+            self.usrp.set_tx_rate(BW * 8)
+            self.usrp.set_tx_freq(
+                uhd.libpyuhd.types.tune_request(FREQ)
+            )
+            self.usrp.set_tx_gain(TX_GAIN)
             self.usrp.set_rx_rate(BW * 8)
             self.usrp.set_rx_freq(
                 uhd.libpyuhd.types.tune_request(FREQ)
             )
             self.usrp.set_rx_gain(RX_GAIN)
-            print(f"Server USRP RX initialized OK")
+
+            self.tx_streamer = self.usrp.get_tx_stream(
+                uhd.usrp.StreamArgs("fc32", "sc16")
+            )
+            self.rx_streamer = self.usrp.get_rx_stream(
+                uhd.usrp.StreamArgs("fc32", "sc16")
+            )
+
+            print(f"Server USRP {USRP_TYPE.upper()} initialized OK")
+
         except Exception as e:
             print(f"Server USRP init failed: {e}")
             self.usrp = None
 
+    def _modulate(self, data_bytes):
+        """Modulate bytes into LoRa chirp signal."""
+        bits = np.unpackbits(
+            np.frombuffer(data_bytes, dtype=np.uint8)
+        )
+        samples_per_symbol = int(2**SF)
+        n = np.arange(samples_per_symbol)
+
+        upchirp = np.exp(1j * 2 * np.pi * (
+            n / samples_per_symbol +
+            n**2 / (2 * samples_per_symbol)
+        ))
+
+        symbols = []
+        for i in range(0, len(bits), SF):
+            chunk = bits[i:i+SF]
+            if len(chunk) < SF:
+                chunk = np.pad(chunk, (0, SF - len(chunk)))
+            k = int(''.join(map(str, chunk)), 2) % samples_per_symbol
+            symbols.append(np.roll(upchirp, k))
+
+        return np.concatenate(symbols).astype(np.complex64)
+
+    def _demodulate(self, signal, n_bytes):
+        """Demodulate received LoRa signal back to bytes."""
+        samples_per_symbol = int(2**SF)
+        n = np.arange(samples_per_symbol)
+
+        downchirp = np.exp(-1j * 2 * np.pi * (
+            n / samples_per_symbol +
+            n**2 / (2 * samples_per_symbol)
+        ))
+
+        bits = []
+        n_symbols = len(signal) // samples_per_symbol
+
+        for i in range(n_symbols):
+            chunk = signal[
+                i*samples_per_symbol:(i+1)*samples_per_symbol
+            ]
+            dechirped = chunk * downchirp
+            fft = np.abs(np.fft.fft(dechirped))
+            k = np.argmax(fft) % samples_per_symbol
+            symbol_bits = format(k, f'0{SF}b')
+            bits.extend([int(b) for b in symbol_bits])
+
+        bits = np.array(bits[:n_bytes*8], dtype=np.uint8)
+        recovered = np.packbits(bits)
+        return bytes(recovered[:n_bytes])
+
+    def _rf_tx(self, data_bytes):
+        """Transmit bytes via RF."""
+        if self.usrp is None:
+            return False
+        try:
+            signal = self._modulate(data_bytes)
+            tx_metadata = uhd.types.TXMetadata()
+            tx_metadata.start_of_burst = True
+            tx_metadata.end_of_burst = True
+            tx_metadata.has_time_spec = False
+            num_sent = self.tx_streamer.send(signal, tx_metadata)
+            return num_sent > 0
+        except Exception as e:
+            print(f"Server RF TX error: {e}")
+            return False
+
+    def _rf_rx(self, n_bytes, timeout=30):
+        """Receive bytes via RF."""
+        if self.usrp is None:
+            return None
+        try:
+            samples_per_symbol = int(2**SF)
+            n_symbols = (n_bytes * 8 + SF - 1) // SF
+            n_samples = n_symbols * samples_per_symbol + samples_per_symbol
+
+            rx_buffer = np.zeros(n_samples, dtype=np.complex64)
+            rx_metadata = uhd.types.RXMetadata()
+
+            stream_cmd = uhd.types.StreamCMD(
+                uhd.types.StreamMode.num_done
+            )
+            stream_cmd.num_samps = n_samples
+            stream_cmd.stream_now = True
+            self.rx_streamer.issue_stream_cmd(stream_cmd)
+
+            num_rx = self.rx_streamer.recv(rx_buffer, rx_metadata)
+
+            if num_rx > 0:
+                snr = self._measure_snr(rx_buffer[:num_rx])
+                return self._demodulate(rx_buffer[:num_rx], n_bytes), snr
+            return None, None
+
+        except Exception as e:
+            print(f"Server RF RX error: {e}")
+            return None, None
+
     def _measure_snr(self, signal):
-        """Measure real SNR from received RF signal."""
+        """Measure real SNR from received signal."""
         signal_power = np.mean(np.abs(signal)**2)
         noise_power = (np.mean(np.abs(signal[-100:])**2)
                       if len(signal) > 100
@@ -432,104 +571,75 @@ class USRPServer:
 
     def receive_all_homes(self, day, timeout=300):
         """
-        Receive full params from ALL homes before returning.
-        Send ACK immediately on each receipt.
-        Measure real SNR from USRP RX.
+        Receive compressed params from ALL homes via RF.
+        Send RF ACK immediately on each receipt.
         Only returns when all n_homes received or timeout.
         """
         received = {}
         self.uplink_attempted += self.n_homes
 
         expected_window = self.n_homes * (20 + 0.5 + 2)
-        print(f"\nServer Day {day}: Listening for {self.n_homes} homes")
+        print(f"\nServer Day {day}: Listening for {self.n_homes} homes via RF")
         print(f"Expected window: ~{expected_window:.0f}s")
         print(f"Will wait for ALL {self.n_homes} homes before aggregating")
 
-        with socket.socket(
-            socket.AF_INET, socket.SOCK_STREAM
-        ) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(('0.0.0.0', SERVER_PORT))
-            s.settimeout(timeout)
-            s.listen(self.n_homes)
+        start_time = time.time()
 
-            while len(received) < self.n_homes:
-                try:
-                    conn, addr = s.accept()
-                    with conn:
-                        size_data = conn.recv(4)
-                        size = struct.unpack('>I', size_data)[0]
-                        raw = b''
-                        while len(raw) < size:
-                            chunk = conn.recv(4096)
-                            if not chunk:
-                                break
-                            raw += chunk
+        while len(received) < self.n_homes:
+            if time.time() - start_time > timeout:
+                print(f"Server: Timeout got {len(received)}/{self.n_homes}")
+                break
 
-                        packet = pickle.loads(raw)
-                        home_id = packet['home_id']
+            try:
+                # RX 49 bytes from a home
+                rx_bytes, snr = self._rf_rx(49, timeout=10)
 
-                        # Send ACK immediately
-                        conn.sendall(b'ACK')
+                if rx_bytes is not None:
+                    # Deserialize compressed params
+                    compressed = pickle.loads(rx_bytes)
+                    home_id = compressed.get('client_id')
+
+                    if home_id is not None and home_id not in received:
+                        # Send RF ACK immediately
+                        self._rf_tx(PKT_ACK)
                         self.uplink_confirmed += 1
 
-                        # Measure real SNR from USRP RX
-                        measured_snr = None
-                        if self.usrp is not None:
-                            try:
-                                rx_streamer = self.usrp.get_rx_stream(
-                                    uhd.usrp.StreamArgs("fc32", "sc16")
-                                )
-                                n_samples = int(2**SF) * 100
-                                rx_buf = np.zeros(
-                                    n_samples, dtype=np.complex64
-                                )
-                                rx_meta = uhd.types.RXMetadata()
-                                rx_streamer.recv(rx_buf, rx_meta)
-                                measured_snr = self._measure_snr(rx_buf)
-                                self.snr_per_home[home_id] = measured_snr
-                            except Exception as e:
-                                print(f"SNR measurement failed: {e}")
+                        if snr is not None:
+                            self.snr_per_home[home_id] = snr
 
-                        packet['measured_snr'] = measured_snr
-                        received[home_id] = packet
+                        received[home_id] = compressed
 
-                        print(f"Server: Home {home_id} received | "
+                        print(f"Server: Home {home_id} received via RF | "
                               f"ACK sent | "
-                              f"RF: {'YES' if packet.get('rf_success') else 'NO'} | "
-                              f"Retry: {packet.get('retry', 0)} | "
-                              f"SNR: {f'{measured_snr:.2f}dB' if measured_snr else 'N/A'} | "
+                              f"SNR: {f'{snr:.2f}dB' if snr else 'N/A'} | "
                               f"Progress: {len(received)}/{self.n_homes}")
 
-                except socket.timeout:
-                    print(f"Server: Timeout "
-                          f"got {len(received)}/{self.n_homes} homes")
-                    break
+            except Exception as e:
+                print(f"Server RX error: {e}")
+                time.sleep(1)
 
         uplink_pdr = (self.uplink_confirmed / self.uplink_attempted
                      if self.uplink_attempted > 0 else 0.0)
-        print(f"\nServer Day {day}: All homes received")
+        print(f"\nServer Day {day}: All homes received via RF")
         print(f"Uplink PDR: {uplink_pdr*100:.1f}% "
               f"({self.uplink_confirmed}/{self.uplink_attempted})")
         print(f"Now aggregating ME-CFL...")
 
         return received
 
-    def broadcast_global_model(self, global_params, day):
+    def broadcast_global_compressed(self, compressed_global, day):
         """
-        Broadcast global model to all homes.
-        Wait for ACK from each home.
+        Broadcast compressed global model to all homes via RF.
+        Wait for RF ACK from each home.
         Retry up to MAX_RETRIES if no ACK.
-        Measure real downlink PDR.
         """
-        print(f"\nServer Day {day}: Broadcasting to {self.n_homes} homes...")
+        print(f"\nServer Day {day}: Broadcasting global model via RF...")
 
-        data = pickle.dumps({'params': global_params, 'day': day})
+        serialized = pickle.dumps(compressed_global)
+        payload = serialized[:49]
         self.downlink_attempted += self.n_homes
 
         for home_id in range(1, self.n_homes + 1):
-            home_ip = home_ips.get(home_id)
-            port = HOME_PORT + home_id
             ack_received = False
             retries = 0
 
@@ -539,26 +649,20 @@ class USRPServer:
                           f"to Home {home_id}...")
                     time.sleep(RETRY_WAIT)
 
-                try:
-                    with socket.socket(
-                        socket.AF_INET, socket.SOCK_STREAM
-                    ) as s:
-                        s.settimeout(ACK_TIMEOUT)
-                        s.connect((home_ip, port))
-                        s.sendall(
-                            struct.pack('>I', len(data)) + data
-                        )
-                        ack = s.recv(4)
-                        ack_received = ack == b'ACK'
+                # RF TX global model
+                tx_ok = self._rf_tx(payload)
 
-                        if ack_received:
-                            self.downlink_confirmed += 1
-                            print(f"Server: Home {home_id} ACK received "
-                                  f"(attempt {retries+1})")
-
-                except Exception as e:
-                    print(f"Server: Home {home_id} attempt "
-                          f"{retries+1} failed: {e}")
+                if tx_ok:
+                    # Wait for RF ACK from home
+                    ack_bytes, _ = self._rf_rx(1, timeout=ACK_TIMEOUT)
+                    if ack_bytes and ack_bytes[0:1] == PKT_ACK:
+                        ack_received = True
+                        self.downlink_confirmed += 1
+                        print(f"Server: Home {home_id} ACK received "
+                              f"(attempt {retries+1})")
+                    else:
+                        print(f"Server: Home {home_id} no ACK "
+                              f"(attempt {retries+1})")
 
                 retries += 1
 

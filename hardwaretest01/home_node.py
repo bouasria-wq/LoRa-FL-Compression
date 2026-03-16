@@ -1,12 +1,13 @@
 """
-Individual Home Node - ME-CFL Hardware Version
-===============================================
+Individual Home Node - ME-CFL Hardware Version RF ONLY
+=======================================================
 Implements:
 - Error feedback (ME-CFL Eq 7-8)
 - Local shift tracking (ME-CFL Eq 9)
 - Momentum updates (ME-CFL Eq 10)
 - Heterogeneous variance measurement (ME-CFL Eq 3)
-- Real USRP hardware LoRa TX/RX via LAN
+- Real USRP hardware LoRa TX/RX via RF only
+- No LAN, no WiFi needed
 
 Temperature range: -50 to +50 degrees C
 File: home_node.py
@@ -38,9 +39,9 @@ class HomeNode:
         self.epochs_per_day = epochs_per_day
         self.samples_per_day = 96
 
-        print(f"\nHOME {self.home_id:02d} - ME-CFL HARDWARE VERSION")
+        print(f"\nHOME {self.home_id:02d} - ME-CFL HARDWARE VERSION RF ONLY")
         print(f"Error feedback: ON | Variance reduction: ON | Momentum: ON")
-        print(f"Mode: REAL USRP HARDWARE")
+        print(f"Mode: REAL USRP RF ONLY — no LAN needed")
 
         self.trainer = LocalTrainer(
             home_id=home_id,
@@ -82,15 +83,15 @@ class HomeNode:
         X_cum, y_cum = self.data_loader.get_features_target(df_cumulative)
         return X_cum, y_cum
 
-    def flatten_global(self, global_params):
-        if isinstance(global_params, list):
+    def flatten_params(self, params):
+        if isinstance(params, list):
             return np.concatenate(
-                [np.array(p).flatten() for p in global_params]
+                [np.array(p).flatten() for p in params]
             )
-        elif isinstance(global_params, np.ndarray):
-            return global_params.flatten()
+        elif isinstance(params, np.ndarray):
+            return params.flatten()
         else:
-            return np.array(global_params).flatten()
+            return np.array(params).flatten()
 
     def apply_momentum_update(self, local_params, global_flat):
         """ME-CFL Eq 10: Momentum update in Hilbert space."""
@@ -142,7 +143,7 @@ class HomeNode:
         return params, zeta_i
 
     def run_day(self, day_num):
-        # Train locally — get params AND zeta_i
+        # Train locally
         params, zeta_i = self.train_on_day(day_num)
 
         # ME-CFL Eq 7-8: Compress with error feedback
@@ -150,40 +151,29 @@ class HomeNode:
         compressed = self.hegazy.encode_parameters(
             params, self.home_id, a, b
         )
-        serialized = pickle.dumps(compressed)
 
-        # Build full packet with params + zeta for server
-        full_packet = {
-            'home_id': self.home_id,
-            'day': day_num,
-            'params': params,
-            'zeta_i': zeta_i,
-            'local_shift': self.hegazy.local_shift,
-            'compressed_49': serialized[:49]
-        }
+        # TX compressed params via RF only
+        result = self.lora.transmit_compressed(compressed, self.home_id)
 
-        # Transmit via real USRP hardware
-        result = self.lora.transmit_full(
-            full_packet,
-            serialized[:49],
-            self.home_id
-        )
-        success = result['success']
-
-        print(f"LoRa TX (USRP HW): {'SUCCESS' if success else 'FAILED'} | "
+        print(f"LoRa TX (USRP RF): "
+              f"{'SUCCESS' if result['success'] else 'FAILED'} | "
               f"ToA: {result['toa']:.4f}s | "
               f"PDR: {result['pdr']*100:.1f}% | "
               f"BER: {result['ber']:.6f} | "
-              f"RF: {'YES' if result['rf_success'] else 'NO'}")
+              f"SNR: {result['snr']:.2f}dB")
 
-        # Wait for global model from server via LAN
-        data = self.lora.receive_global_model(
+        # Wait for compressed global model via RF
+        compressed_global = self.lora.receive_global_compressed(
             self.home_id, timeout=300
         )
 
-        if data is not None:
-            global_params = data.get('params')
-            global_flat = self.flatten_global(global_params)
+        if compressed_global is not None:
+            # Decode global model from compressed
+            a_g, b_g = compressed_global.get('a', 1.0), \
+                       compressed_global.get('b', 0.0)
+            global_flat = self.hegazy.decode_parameters(
+                compressed_global, a_g, b_g
+            )
 
             if self.prev_global is not None:
                 updated_flat = self.apply_momentum_update(
