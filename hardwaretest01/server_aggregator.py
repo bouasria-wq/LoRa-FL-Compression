@@ -158,9 +158,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--n_homes', type=int, default=4)
     parser.add_argument('--days', type=int, default=7)
+    parser.add_argument('--serial', type=str, default=None)
     args = parser.parse_args()
+    
+    if args.serial:
+        import os
+        os.environ['USRP_SERIAL'] = args.serial
+    
     ServerAggregator(n_homes=args.n_homes, n_days=args.days).run()
-
-
-if __name__ == "__main__":
-    main()

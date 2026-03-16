@@ -11,6 +11,7 @@ Home and server only need USRP connected via USB.
 - Time slots: 20 seconds between each home
 - Retry logic: max 3 retries
 - Two-way ACK via RF
+- Serial number support for multi-USRP
 
 File: lora/usrp_lora.py
 """
@@ -18,12 +19,12 @@ import numpy as np
 import time
 import pickle
 import struct
+import os
 
 # ============================================================
 # CONFIG — reads from config.py
 # ============================================================
 import sys
-import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import USRP_TYPE, USRP_IP
 
@@ -43,17 +44,17 @@ TIME_SLOTS = {
 
 # Retry config
 MAX_RETRIES = 3
-ACK_TIMEOUT = 30   # seconds to wait for ACK via RF
-RETRY_WAIT  = 5    # seconds between retries
+ACK_TIMEOUT = 30
+RETRY_WAIT  = 5
 
 # TX/RX gain
 TX_GAIN = 30
 RX_GAIN = 20
 
 # Packet types
-PKT_PARAMS  = b'P'   # home sending params to server
-PKT_ACK     = b'A'   # acknowledgement
-PKT_GLOBAL  = b'G'   # server sending global model back
+PKT_PARAMS  = b'P'
+PKT_ACK     = b'A'
+PKT_GLOBAL  = b'G'
 # ============================================================
 
 try:
@@ -78,7 +79,6 @@ class USRPLoRaInterface:
         self.tx_streamer = None
         self.rx_streamer = None
 
-        # Real measured statistics
         self.packets_attempted = 0
         self.packets_confirmed = 0
         self.total_bit_errors = 0
@@ -100,7 +100,10 @@ class USRPLoRaInterface:
     def _init_usrp(self):
         """Initialize USRP device."""
         try:
-            if USRP_IP:
+            serial = os.environ.get('USRP_SERIAL')
+            if serial:
+                args = f"serial={serial},type={USRP_TYPE}"
+            elif USRP_IP:
                 args = f"addr={USRP_IP},type={USRP_TYPE}"
             else:
                 args = f"type={USRP_TYPE}"
@@ -125,6 +128,7 @@ class USRPLoRaInterface:
             )
 
             print(f"USRP {USRP_TYPE.upper()} initialized OK")
+            print(f"Serial: {serial if serial else 'auto'}")
             print(f"TX rate: {self.usrp.get_tx_rate()/1e3:.1f}kHz")
             print(f"RX rate: {self.usrp.get_rx_rate()/1e3:.1f}kHz")
 
@@ -266,7 +270,6 @@ class USRPLoRaInterface:
         toa = self._compute_toa(len(payload))
         self.packets_attempted += 1
 
-        # Step 1: Wait for time slot
         slot_time = TIME_SLOTS.get(home_id, 0)
         if slot_time > 0:
             print(f"Home {home_id}: Waiting {slot_time}s for slot...")
@@ -286,14 +289,10 @@ class USRPLoRaInterface:
                       f"waiting {RETRY_WAIT}s...")
                 time.sleep(RETRY_WAIT)
 
-            # RF TX
             rf_success, sent_bits = self._rf_tx(payload)
 
             if rf_success:
-                print(f"Home {home_id}: RF TX OK | "
-                      f"Waiting for ACK...")
-
-                # Wait for RF ACK from server
+                print(f"Home {home_id}: RF TX OK | Waiting for ACK...")
                 ack_bytes, _ = self._rf_rx(1, timeout=ACK_TIMEOUT)
                 if ack_bytes and ack_bytes[0:1] == PKT_ACK:
                     ack_received = True
@@ -315,7 +314,6 @@ class USRPLoRaInterface:
                     if self.packets_attempted > 0 else 0.0)
         real_ber = (self.total_bit_errors / self.total_bits_compared
                     if self.total_bits_compared > 0 else 0.0)
-
         avg_snr = (np.mean(self.snr_measurements)
                   if self.snr_measurements else 0.0)
 
@@ -356,16 +354,12 @@ class USRPLoRaInterface:
         while time.time() - start_time < timeout:
             attempts += 1
             try:
-                # RX compressed global model
                 rx_bytes, rx_bits = self._rf_rx(49, timeout=10)
 
                 if rx_bytes is not None:
-                    # Send RF ACK back to server
                     self._rf_tx(PKT_ACK)
                     print(f"Home {home_id}: Global model received via RF | "
                           f"ACK sent")
-
-                    # Deserialize compressed dict
                     compressed_global = pickle.loads(rx_bytes)
                     return compressed_global
 
@@ -397,15 +391,9 @@ class USRPLoRaInterface:
 
 class USRPServer:
     """
-    Server side RF only:
-    - Receives compressed params via RF from all homes
-    - Sends RF ACK immediately on receipt
-    - Decodes via Hegazy
-    - Runs ME-CFL aggregation
-    - Encodes global model
-    - Broadcasts via RF back to all homes
-    - Waits for RF ACK from each home
-    - Measures real PDR/SNR/BER
+    Server side RF only.
+    No LAN, no WiFi, no sockets.
+    Everything through USRP RF.
     """
 
     def __init__(self, n_homes=4):
@@ -414,7 +402,6 @@ class USRPServer:
         self.tx_streamer = None
         self.rx_streamer = None
 
-        # Real measured statistics
         self.uplink_attempted = 0
         self.uplink_confirmed = 0
         self.downlink_attempted = 0
@@ -434,7 +421,10 @@ class USRPServer:
     def _init_usrp(self):
         """Initialize USRP device."""
         try:
-            if USRP_IP:
+            serial = os.environ.get('USRP_SERIAL')
+            if serial:
+                args = f"serial={serial},type={USRP_TYPE}"
+            elif USRP_IP:
                 args = f"addr={USRP_IP},type={USRP_TYPE}"
             else:
                 args = f"type={USRP_TYPE}"
@@ -459,6 +449,7 @@ class USRPServer:
             )
 
             print(f"Server USRP {USRP_TYPE.upper()} initialized OK")
+            print(f"Serial: {serial if serial else 'auto'}")
 
         except Exception as e:
             print(f"Server USRP init failed: {e}")
@@ -533,7 +524,7 @@ class USRPServer:
     def _rf_rx(self, n_bytes, timeout=30):
         """Receive bytes via RF."""
         if self.usrp is None:
-            return None
+            return None, None
         try:
             samples_per_symbol = int(2**SF)
             n_symbols = (n_bytes * 8 + SF - 1) // SF
@@ -591,16 +582,13 @@ class USRPServer:
                 break
 
             try:
-                # RX 49 bytes from a home
                 rx_bytes, snr = self._rf_rx(49, timeout=10)
 
                 if rx_bytes is not None:
-                    # Deserialize compressed params
                     compressed = pickle.loads(rx_bytes)
                     home_id = compressed.get('client_id')
 
                     if home_id is not None and home_id not in received:
-                        # Send RF ACK immediately
                         self._rf_tx(PKT_ACK)
                         self.uplink_confirmed += 1
 
@@ -649,11 +637,9 @@ class USRPServer:
                           f"to Home {home_id}...")
                     time.sleep(RETRY_WAIT)
 
-                # RF TX global model
                 tx_ok = self._rf_tx(payload)
 
                 if tx_ok:
-                    # Wait for RF ACK from home
                     ack_bytes, _ = self._rf_rx(1, timeout=ACK_TIMEOUT)
                     if ack_bytes and ack_bytes[0:1] == PKT_ACK:
                         ack_received = True

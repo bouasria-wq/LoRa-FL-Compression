@@ -206,13 +206,15 @@ def main():
     parser.add_argument('--home_id', type=int, required=True)
     parser.add_argument('--days', type=int, default=7)
     parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--serial', type=str, default=None)
     args = parser.parse_args()
+
+    if args.serial:
+        import os
+        os.environ['USRP_SERIAL'] = args.serial
+
     HomeNode(
         home_id=args.home_id,
         n_days=args.days,
         epochs_per_day=args.epochs
     ).run()
-
-
-if __name__ == "__main__":
-    main()
