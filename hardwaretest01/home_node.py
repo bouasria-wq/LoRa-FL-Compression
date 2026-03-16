@@ -42,12 +42,24 @@ class HomeNode:
         print(f"Error feedback: ON | Variance reduction: ON | Momentum: ON")
         print(f"Mode: REAL USRP HARDWARE")
 
-        self.trainer = LocalTrainer(home_id=home_id, sequence_length=16, learning_rate=0.0005)
-        self.data_loader = DataLoader(data_dir='data', n_homes=10, n_days=n_days)
+        self.trainer = LocalTrainer(
+            home_id=home_id,
+            sequence_length=16,
+            learning_rate=0.0005
+        )
+        self.data_loader = DataLoader(
+            data_dir='data',
+            n_homes=10,
+            n_days=n_days
+        )
         self.df_full = self.data_loader.load_home_data(home_id)
 
         self.lora = USRPLoRaInterface(home_id=home_id)
-        self.hegazy = AggregateGaussianMechanism(n_clients=10, sigma=0.1, seed=home_id)
+        self.hegazy = AggregateGaussianMechanism(
+            n_clients=10,
+            sigma=0.1,
+            seed=home_id
+        )
 
         # ME-CFL Eq 10: Momentum state
         self.momentum = None
@@ -58,17 +70,23 @@ class HomeNode:
         self.daily_metrics = []
 
     def get_cumulative_data(self, day_num):
-        df_cumulative = self.df_full.iloc[0:day_num * self.samples_per_day].copy()
+        df_cumulative = self.df_full.iloc[
+            0:day_num * self.samples_per_day
+        ].copy()
         temp_cols = ['T_indoor', 'T_outdoor']
         for col in temp_cols:
             if col in df_cumulative.columns:
-                df_cumulative[col] = np.clip((df_cumulative[col] + 50.0) / 100.0, 0, 1)
+                df_cumulative[col] = np.clip(
+                    (df_cumulative[col] + 50.0) / 100.0, 0, 1
+                )
         X_cum, y_cum = self.data_loader.get_features_target(df_cumulative)
         return X_cum, y_cum
 
     def flatten_global(self, global_params):
         if isinstance(global_params, list):
-            return np.concatenate([np.array(p).flatten() for p in global_params])
+            return np.concatenate(
+                [np.array(p).flatten() for p in global_params]
+            )
         elif isinstance(global_params, np.ndarray):
             return global_params.flatten()
         else:
@@ -85,7 +103,8 @@ class HomeNode:
         return updated_flat
 
     def train_on_day(self, day_num):
-        print(f"\n--- HOME {self.home_id:02d} | DAY {day_num} | {self.epochs_per_day} EPOCHS | ME-CFL HW ---")
+        print(f"\n--- HOME {self.home_id:02d} | DAY {day_num} | "
+              f"{self.epochs_per_day} EPOCHS | ME-CFL HW ---")
         X_cum, y_cum = self.get_cumulative_data(day_num)
         X_seq, y_seq = self.trainer.create_sequences(X_cum, y_cum)
 
@@ -101,7 +120,10 @@ class HomeNode:
         metrics = self.trainer.evaluate(X_seq, y_seq)
         actual_mae = metrics['mae'] * 100.0
         temp_range = y_seq.max() - y_seq.min()
-        accuracy = (1 - metrics['mae'] / temp_range) * 100 if temp_range > 0 else 0.0
+        accuracy = (
+            (1 - metrics['mae'] / temp_range) * 100
+            if temp_range > 0 else 0.0
+        )
 
         params = self.trainer.get_parameters()
         params_flat = np.concatenate([p.flatten() for p in params])
@@ -117,19 +139,35 @@ class HomeNode:
             'accuracy': accuracy,
             'zeta_i': zeta_i
         })
-        return params
+        return params, zeta_i
 
     def run_day(self, day_num):
-        # Train locally
-        params = self.train_on_day(day_num)
+        # Train locally — get params AND zeta_i
+        params, zeta_i = self.train_on_day(day_num)
 
         # ME-CFL Eq 7-8: Compress with error feedback
         a, b = self.hegazy.decompose()
-        compressed = self.hegazy.encode_parameters(params, self.home_id, a, b)
+        compressed = self.hegazy.encode_parameters(
+            params, self.home_id, a, b
+        )
         serialized = pickle.dumps(compressed)
 
+        # Build full packet with params + zeta for server
+        full_packet = {
+            'home_id': self.home_id,
+            'day': day_num,
+            'params': params,
+            'zeta_i': zeta_i,
+            'local_shift': self.hegazy.local_shift,
+            'compressed_49': serialized[:49]
+        }
+
         # Transmit via real USRP hardware
-        result = self.lora.transmit(serialized[:49], self.home_id)
+        result = self.lora.transmit_full(
+            full_packet,
+            serialized[:49],
+            self.home_id
+        )
         success = result['success']
 
         print(f"LoRa TX (USRP HW): {'SUCCESS' if success else 'FAILED'} | "
@@ -139,14 +177,18 @@ class HomeNode:
               f"RF: {'YES' if result['rf_success'] else 'NO'}")
 
         # Wait for global model from server via LAN
-        data = self.lora.receive_global_model(self.home_id, timeout=300)
+        data = self.lora.receive_global_model(
+            self.home_id, timeout=300
+        )
 
         if data is not None:
             global_params = data.get('params')
             global_flat = self.flatten_global(global_params)
 
             if self.prev_global is not None:
-                updated_flat = self.apply_momentum_update(params, global_flat)
+                updated_flat = self.apply_momentum_update(
+                    params, global_flat
+                )
                 self.trainer.model.set_parameters(updated_flat)
                 print(f"Momentum update applied (beta={self.beta})")
             else:

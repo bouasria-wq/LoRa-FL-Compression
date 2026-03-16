@@ -6,7 +6,7 @@ Everything measured from real hardware:
 - PDR measured from actual packet success/fail + retries
 - BER measured from actual bit comparison
 - ToA computed from real SF/BW parameters
-- Time slots: 5 seconds between each home
+- Time slots: 20 seconds between each home
 - Retry logic: max 3 retries per packet
 - Two-way ACK: both uplink and downlink confirmed
 - No hardcoded assumed values
@@ -36,12 +36,12 @@ BW   = 125000   # bandwidth Hz
 CR   = 1        # coding rate 4/5
 FREQ = 915e6    # 915 MHz ISM band
 
-# Time slots — 5 seconds between each home
+# Time slots — 20 seconds between each home
 TIME_SLOTS = {
     1: 0,    # Home 1 transmits at t=0s
-    2: 20,    # Home 2 transmits at t=5s
-    3: 40,   # Home 3 transmits at t=10s
-    4: 60,   # Home 4 transmits at t=15s
+    2: 20,   # Home 2 transmits at t=20s
+    3: 40,   # Home 3 transmits at t=40s
+    4: 60,   # Home 4 transmits at t=60s
 }
 
 # Retry config
@@ -70,6 +70,7 @@ class USRPLoRaInterface:
     - Retry up to 3 times if no ACK
     - PDR calculated after all retries
     - Two-way ACK for downlink global model
+    - transmit_full sends full params via LAN + 49 bytes via RF
     """
 
     def __init__(self, home_id=None):
@@ -121,6 +122,7 @@ class USRPLoRaInterface:
         except Exception as e:
             print(f"USRP init failed: {e}")
             self.usrp = None
+
     def _modulate_lora(self, data_bytes):
         """Modulate bytes into LoRa chirp signal."""
         bits = np.unpackbits(
@@ -206,27 +208,23 @@ class USRPLoRaInterface:
                 s.connect((SERVER_IP, SERVER_PORT))
                 data = pickle.dumps(packet_data)
                 s.sendall(struct.pack('>I', len(data)) + data)
-
-                # Wait for ACK
                 ack = s.recv(4)
                 return ack == b'ACK'
-
         except Exception as e:
             print(f"LAN TX error: {e}")
             return False
 
-    def transmit(self, data_bytes, home_id):
+    def transmit_full(self, full_packet, compressed_49, home_id):
         """
-        Full TX pipeline with time slots and retries:
+        Full TX pipeline:
         1. Wait for time slot
-        2. Modulate + RF TX via USRP
-        3. Send via LAN
+        2. RF TX — sends 49 compressed bytes over real RF
+        3. LAN TX — sends full params + zeta to server
         4. Wait for ACK
         5. Retry up to MAX_RETRIES if no ACK
         6. Calculate real PDR after all retries
         """
-        payload = data_bytes[:49]
-        toa = self._compute_toa(len(payload))
+        toa = self._compute_toa(len(compressed_49))
         self.packets_attempted += 1
 
         # Step 1: Wait for time slot
@@ -239,18 +237,14 @@ class USRPLoRaInterface:
               f"ToA: {toa:.4f}s | "
               f"Attempting TX...")
 
-        # Modulate once — reuse for retries
-        signal, sent_bits = self._modulate_lora(payload)
+        # Modulate 49 bytes for RF
+        signal, sent_bits = self._modulate_lora(compressed_49)
 
-        # Prepare packet
-        packet = {
-            'home_id': home_id,
-            'payload': payload,
-            'toa': toa,
-            'sent_bits': sent_bits.tolist()
-        }
+        # Add RF metadata to packet
+        full_packet['toa'] = toa
+        full_packet['sent_bits'] = sent_bits.tolist()
 
-        # Step 2-5: TX with retries
+        # Steps 2-5: TX with retries
         rf_success = False
         ack_received = False
         retries = 0
@@ -258,16 +252,16 @@ class USRPLoRaInterface:
         while retries <= MAX_RETRIES and not ack_received:
             if retries > 0:
                 print(f"Home {home_id}: Retry {retries}/{MAX_RETRIES} "
-                      f"— waiting {RETRY_WAIT}s...")
+                      f"waiting {RETRY_WAIT}s...")
                 time.sleep(RETRY_WAIT)
 
-            # RF TX via USRP
+            # RF TX via USRP — 49 bytes over real RF
             rf_success = self._rf_transmit(signal)
-            packet['rf_success'] = rf_success
-            packet['retry'] = retries
+            full_packet['rf_success'] = rf_success
+            full_packet['retry'] = retries
 
-            # LAN TX + wait for ACK
-            ack_received = self._lan_transmit_with_ack(packet)
+            # LAN TX — full params to server + wait for ACK
+            ack_received = self._lan_transmit_with_ack(full_packet)
 
             if ack_received:
                 self.packets_confirmed += 1
@@ -335,7 +329,6 @@ class USRPLoRaInterface:
                     conn, addr = s.accept()
 
                     with conn:
-                        # Receive data
                         size_data = conn.recv(4)
                         size = struct.unpack('>I', size_data)[0]
                         raw = b''
@@ -346,8 +339,6 @@ class USRPLoRaInterface:
                             raw += chunk
 
                         data = pickle.loads(raw)
-
-                        # Send ACK back to server
                         conn.sendall(b'ACK')
                         print(f"Home {home_id}: Global model received | "
                               f"ACK sent to server")
@@ -358,8 +349,7 @@ class USRPLoRaInterface:
                       f"failed: {e}")
                 time.sleep(2)
 
-        print(f"Home {home_id}: Global model timeout after "
-              f"{timeout}s")
+        print(f"Home {home_id}: Global model timeout after {timeout}s")
         return None
 
     def get_statistics(self):
@@ -383,9 +373,10 @@ class USRPLoRaInterface:
 class USRPServer:
     """
     Server side:
-    - Receives from all homes via LAN
+    - Receives full params from all homes via LAN
     - Sends ACK to each home immediately on receipt
     - Waits for ALL homes before aggregating
+    - Measures real SNR from USRP RX
     - Broadcasts global model with retry
     - Waits for ACK from each home after broadcast
     - Measures real PDR for both uplink and downlink
@@ -393,6 +384,7 @@ class USRPServer:
 
     def __init__(self, n_homes=4):
         self.n_homes = n_homes
+        self.usrp = None
 
         # Real measured statistics
         self.uplink_attempted = 0
@@ -440,7 +432,7 @@ class USRPServer:
 
     def receive_all_homes(self, day, timeout=300):
         """
-        Receive from ALL homes before returning.
+        Receive full params from ALL homes before returning.
         Send ACK immediately on each receipt.
         Measure real SNR from USRP RX.
         Only returns when all n_homes received or timeout.
@@ -448,14 +440,10 @@ class USRPServer:
         received = {}
         self.uplink_attempted += self.n_homes
 
-        # Expected window: n_homes * (slot_time + ToA + buffer)
-        # = 4 homes * (5s slot + 0.12s ToA + 2s buffer) = ~29s minimum
-        expected_window = self.n_homes * (5 + 0.5 + 2)
+        expected_window = self.n_homes * (20 + 0.5 + 2)
         print(f"\nServer Day {day}: Listening for {self.n_homes} homes")
-        print(f"Expected window: ~{expected_window:.0f}s "
-              f"(slots + ToA + buffer)")
-        print(f"Will wait for ALL {self.n_homes} homes "
-              f"before aggregating")
+        print(f"Expected window: ~{expected_window:.0f}s")
+        print(f"Will wait for ALL {self.n_homes} homes before aggregating")
 
         with socket.socket(
             socket.AF_INET, socket.SOCK_STREAM
@@ -469,7 +457,6 @@ class USRPServer:
                 try:
                     conn, addr = s.accept()
                     with conn:
-                        # Receive packet
                         size_data = conn.recv(4)
                         size = struct.unpack('>I', size_data)[0]
                         raw = b''
@@ -488,7 +475,7 @@ class USRPServer:
 
                         # Measure real SNR from USRP RX
                         measured_snr = None
-                        if hasattr(self, 'usrp') and self.usrp is not None:
+                        if self.usrp is not None:
                             try:
                                 rx_streamer = self.usrp.get_rx_stream(
                                     uhd.usrp.StreamArgs("fc32", "sc16")
@@ -515,11 +502,10 @@ class USRPServer:
                               f"Progress: {len(received)}/{self.n_homes}")
 
                 except socket.timeout:
-                    print(f"Server: Timeout — "
+                    print(f"Server: Timeout "
                           f"got {len(received)}/{self.n_homes} homes")
                     break
 
-        # Real uplink PDR
         uplink_pdr = (self.uplink_confirmed / self.uplink_attempted
                      if self.uplink_attempted > 0 else 0.0)
         print(f"\nServer Day {day}: All homes received")
@@ -562,8 +548,6 @@ class USRPServer:
                         s.sendall(
                             struct.pack('>I', len(data)) + data
                         )
-
-                        # Wait for ACK from home
                         ack = s.recv(4)
                         ack_received = ack == b'ACK'
 
@@ -584,7 +568,6 @@ class USRPServer:
                 print(f"Server: Home {home_id} FAILED after "
                       f"{MAX_RETRIES} retries")
 
-        # Real downlink PDR
         downlink_pdr = (self.downlink_confirmed / self.downlink_attempted
                        if self.downlink_attempted > 0 else 0.0)
         print(f"Downlink PDR: {downlink_pdr*100:.1f}% "
