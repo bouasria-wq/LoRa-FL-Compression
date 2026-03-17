@@ -22,25 +22,24 @@ sys.path.insert(0, str(Path(__file__).parent / 'lora'))
 sys.path.insert(0, str(Path(__file__).parent / 'server'))
 
 from load_data import DataLoader
-from model import TemperatureLSTM
 from train import LocalTrainer
 from hegazy import AggregateGaussianMechanism
 from hegazy_lora_bridge import HegazyLoRaBridge
-from gr_lora_hardware import get_home_radio, PAYLOAD_LEN
+from gr_lora_hardware import get_home_radio, LORA_MAX_BYTES
 
 
 class HomeNode:
 
     def __init__(self, home_id, n_days=7, epochs_per_day=100):
-        self.home_id = home_id
-        self.n_days = n_days
+        self.home_id        = home_id
+        self.n_days         = n_days
         self.epochs_per_day = epochs_per_day
         self.samples_per_day = 96
 
         print(f"\nHOME {self.home_id:02d} - ME-CFL HARDWARE VERSION")
         print(f"Error feedback: ON | Variance reduction: ON | Momentum: ON")
         print(f"Transport: Real LoRa over RF via USRP B200")
-        print(f"Payload size: {PAYLOAD_LEN} bytes (struct.pack)")
+        print(f"Max payload: {LORA_MAX_BYTES} bytes")
 
         self.trainer = LocalTrainer(
             home_id=home_id,
@@ -65,17 +64,14 @@ class HomeNode:
         self.beta        = 0.9
         self.eta         = 0.01
         self.prev_global = None
-
         self.daily_metrics = []
 
     def get_cumulative_data(self, day_num):
-        df_cumulative = self.df_full.iloc[0:day_num * self.samples_per_day].copy()
+        df = self.df_full.iloc[0:day_num * self.samples_per_day].copy()
         for col in ['T_indoor', 'T_outdoor']:
-            if col in df_cumulative.columns:
-                df_cumulative[col] = np.clip(
-                    (df_cumulative[col] + 50.0) / 100.0, 0, 1
-                )
-        return self.data_loader.get_features_target(df_cumulative)
+            if col in df.columns:
+                df[col] = np.clip((df[col] + 50.0) / 100.0, 0, 1)
+        return self.data_loader.get_features_target(df)
 
     def flatten_global(self, global_params):
         if isinstance(global_params, list):
@@ -129,25 +125,29 @@ class HomeNode:
         return params
 
     def transmit_via_lora(self, payload: bytes) -> bool:
-        """Transmit struct.packed compressed model over RF via USRP B200."""
-        assert len(payload) == PAYLOAD_LEN, \
-            f"Expected {PAYLOAD_LEN} bytes, got {len(payload)}"
-        print(f"[HOME {self.home_id:02d}] TX {PAYLOAD_LEN} bytes over RF...")
+        """Transmit Hegazy struct.packed model over RF via USRP B200."""
+        assert len(payload) <= LORA_MAX_BYTES, \
+            f"Payload {len(payload)} bytes exceeds LoRa max {LORA_MAX_BYTES}"
+        print(f"[HOME {self.home_id:02d}] TX {len(payload)} bytes over RF...")
         self.radio.transmit(payload)
         print(f"[HOME {self.home_id:02d}] TX complete.")
         return True
 
     def wait_for_global_model(self, day_num, timeout=180):
-        """Receive global model from server via RF RX."""
+        """Receive Hegazy compressed global model from server via RF RX."""
         print(f"[HOME {self.home_id:02d}] Waiting for global model (Day {day_num})...")
         raw = self.radio.receive(timeout=timeout)
 
-        if len(raw) == PAYLOAD_LEN:
+        if len(raw) >= 18:
             try:
-                data = self.lora_bridge.unpack_compressed(raw)
-                if data.get('day') == day_num:
-                    print(f"[HOME {self.home_id:02d}] Global model received Day {day_num}.")
-                    return data['params']
+                compressed  = self.lora_bridge.unpack_compressed(raw)
+                global_flat = self.hegazy.decode_parameters(
+                    compressed,
+                    compressed['a'],
+                    compressed['b']
+                )
+                print(f"[HOME {self.home_id:02d}] Global model received Day {day_num}.")
+                return global_flat
             except Exception as e:
                 print(f"[HOME {self.home_id:02d}] Decode error: {e}")
         else:
@@ -161,17 +161,17 @@ class HomeNode:
         a, b       = self.hegazy.decompose()
         compressed = self.hegazy.encode_parameters(params, self.home_id, a, b)
 
-        # Pack using struct instead of pickle — achieves real 238-byte payload
+        # Pack using struct.pack
         payload = self.lora_bridge.pack_compressed(compressed)
+        print(f"[HOME {self.home_id:02d}] Compressed payload: {len(payload)} bytes")
 
         # Transmit over RF
         self.transmit_via_lora(payload)
 
-        # Wait for global model from server
-        global_params = self.wait_for_global_model(day_num)
+        # Wait for global model from server via RF
+        global_flat = self.wait_for_global_model(day_num)
 
-        if global_params is not None:
-            global_flat = self.flatten_global(global_params)
+        if global_flat is not None:
             if self.prev_global is not None:
                 updated_flat = self.apply_momentum_update(params, global_flat)
                 self.trainer.model.set_parameters(updated_flat)

@@ -2,7 +2,7 @@
 Federated Server Aggregator - ME-CFL Hardware Version
 ======================================================
 Transport: Real LoRa over RF via USRP B200
-Payload: 238 bytes struct.pack (Hegazy compressed)
+Both directions use Hegazy compression — single LoRa packet each way.
 
 File: server_aggregator.py
 """
@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent / 'lora'))
 from hegazy import AggregateGaussianMechanism
 from hegazy_lora_bridge import HegazyLoRaBridge
 from aggregate import FederatedServer
-from gr_lora_hardware import get_server_radio, PAYLOAD_LEN
+from gr_lora_hardware import get_server_radio, LORA_MAX_BYTES
 
 
 class ServerAggregator:
@@ -36,54 +36,53 @@ class ServerAggregator:
             eta=0.01
         )
         self.hegazy = AggregateGaussianMechanism(
-            n_clients=n_homes, sigma=0.1
+            n_clients=n_homes, sigma=0.1, seed=0
         )
         self.radio = get_server_radio()
-
         self.daily_results = []
 
         print("\n" + "="*50)
         print("Federated Server - ME-CFL HARDWARE")
         print("="*50)
-        print(f"Clients: {n_homes} | Payload: {PAYLOAD_LEN} bytes (struct.pack)")
+        print(f"Clients: {n_homes} | Max payload: {LORA_MAX_BYTES} bytes")
         print(f"Transport: Real LoRa over RF via USRP B200")
+        print(f"Compression: Hegazy both directions")
         print("="*50)
 
     def receive_from_home(self, home_id, day_num, timeout=180):
-        """Receive struct.packed compressed model from home via RF RX."""
+        """Receive Hegazy compressed model from home via RF RX."""
         print(f"[SERVER] Waiting for Home {home_id:02d} Day {day_num}...")
         raw = self.radio.receive(timeout=timeout)
 
-        if len(raw) == PAYLOAD_LEN:
+        if len(raw) >= 18:
             try:
-                data = self.lora_bridge.unpack_compressed(raw)
-                print(f"[SERVER] Received from Home {home_id:02d}.")
-                return data
+                compressed = self.lora_bridge.unpack_compressed(raw)
+                decoded    = self.hegazy.decode_parameters(
+                    compressed,
+                    compressed['a'],
+                    compressed['b']
+                )
+                print(f"[SERVER] Received from Home {home_id:02d}. "
+                      f"zeta_i={compressed['zeta_i']:.6f}")
+                return decoded, compressed['zeta_i']
             except Exception as e:
                 print(f"[SERVER] Decode error from Home {home_id:02d}: {e}")
         else:
             print(f"[SERVER] No data from Home {home_id:02d} (timeout).")
-        return None
+        return None, 0.0
 
-    def broadcast_global_model(self, global_params, day_num):
-        """Broadcast global model to home via RF TX using struct.pack."""
-        print(f"[SERVER] Broadcasting global model Day {day_num}...")
+    def broadcast_global_model(self, global_flat, day_num):
+        """Compress global model with Hegazy and broadcast via RF TX."""
+        print(f"[SERVER] Compressing global model Day {day_num}...")
 
-        # Pack global params for transmission
-        broadcast = {
-            'client_id':  0,
-            'm_k':        (global_params[:55] * 1000).astype(np.int16),
-            'dither':     np.zeros(55),
-            'indices':    np.arange(55, dtype=np.uint16),
-            'p_min':      np.float32(global_params.min()),
-            'scale':      np.float32(global_params.max() - global_params.min()),
-            'param_size': 553,
-            'zeta_i':     0.0,
-            'a':          float(day_num),   # encode day in 'a' field
-            'b':          0.0,
-        }
+        a, b       = self.hegazy.decompose()
+        compressed = self.hegazy.encode_parameters([global_flat], 0, a, b)
+        payload    = self.lora_bridge.pack_compressed(compressed)
 
-        payload = self.lora_bridge.pack_compressed(broadcast)
+        assert len(payload) <= LORA_MAX_BYTES, \
+            f"Global model payload {len(payload)} bytes exceeds LoRa max {LORA_MAX_BYTES}"
+
+        print(f"[SERVER] Broadcasting {len(payload)} bytes Day {day_num}...")
         self.radio.transmit(payload)
         print(f"[SERVER] Broadcast complete Day {day_num}.")
 
@@ -95,13 +94,11 @@ class ServerAggregator:
         client_params_dict = {}
         zeta_values        = {}
 
-        data = self.receive_from_home(home_id=1, day_num=day_num)
+        decoded, zeta_i = self.receive_from_home(home_id=1, day_num=day_num)
 
-        if data is not None:
-            # Decode parameters from compressed dict
-            decoded = self.hegazy.decode_parameters(data, data['a'], data['b'])
+        if decoded is not None:
             client_params_dict[1] = decoded
-            zeta_values[1]        = data.get('zeta_i', 0.0)
+            zeta_values[1]        = zeta_i
 
         if not client_params_dict:
             print(f"[SERVER] No updates received Day {day_num}!")
@@ -113,7 +110,7 @@ class ServerAggregator:
         if zeta_values:
             print(f"[SERVER] Avg zeta: {np.mean(list(zeta_values.values())):.6f}")
 
-        # Broadcast back to home
+        # Compress and broadcast back to home
         self.broadcast_global_model(global_flat, day_num)
 
         self.daily_results.append({

@@ -4,8 +4,7 @@
 GNU Radio LoRa Hardware Interface - hardwaretest02
 ===================================================
 Real over-the-air LoRa TX/RX using 2 USRP B200s.
-Matches master prompt specification exactly.
-PAYLOAD_LEN = 238 bytes (Hegazy struct.pack output)
+No fixed PAYLOAD_LEN — accepts any payload <= 255 bytes.
 
 File: lora/gr_lora_hardware.py
 """
@@ -33,7 +32,7 @@ CENTER_FREQ     = 915000000
 SAMP_RATE       = 1000000
 TX_GAIN         = 15
 RX_GAIN         = 15
-PAYLOAD_LEN     = 238     # Hegazy struct.pack: 18 header + 55*2 m_k + 55*2 indices
+LORA_MAX_BYTES  = 255     # LoRa physical layer maximum
 HAS_CRC         = True
 IMPL_HEAD       = False
 SYNC_WORD       = [0x12]
@@ -45,8 +44,8 @@ class LoRaTXFlowgraph(gr.top_block):
     def __init__(self, payload: bytes, usrp_serial: str):
         gr.top_block.__init__(self, "LoRa HW TX")
 
-        assert len(payload) == PAYLOAD_LEN, \
-            f"Payload must be exactly {PAYLOAD_LEN} bytes, got {len(payload)}"
+        assert len(payload) <= LORA_MAX_BYTES, \
+            f"Payload {len(payload)} bytes exceeds LoRa max {LORA_MAX_BYTES}"
 
         self.uhd_usrp_sink = uhd.usrp_sink(
             usrp_serial,
@@ -94,13 +93,14 @@ class LoRaRXFlowgraph(gr.top_block):
             int(np.ceil(SAMP_RATE / BW * (2**SF + 512)))
         )
 
+        # pay_len=255 — accept any packet up to LoRa max
         self.lora_rx = lora_sdr.lora_sdr_lora_rx(
             center_freq=int(CENTER_FREQ),
             bw=BW,
             cr=CR,
             has_crc=HAS_CRC,
             impl_head=IMPL_HEAD,
-            pay_len=PAYLOAD_LEN,
+            pay_len=LORA_MAX_BYTES,
             samp_rate=SAMP_RATE,
             sf=SF,
             sync_word=SYNC_WORD,
@@ -125,27 +125,34 @@ class LoRaHardware:
         self.rx_s = rx_serial
 
     def transmit(self, payload: bytes):
-        assert len(payload) == PAYLOAD_LEN, \
-            f"Expected {PAYLOAD_LEN} bytes, got {len(payload)}"
+        """Transmit payload — must be <= 255 bytes."""
+        assert len(payload) <= LORA_MAX_BYTES, \
+            f"Payload {len(payload)} bytes exceeds LoRa max {LORA_MAX_BYTES}"
+        print(f"[HW TX] Transmitting {len(payload)} bytes over RF...")
         tb = LoRaTXFlowgraph(payload, self.tx_s)
         tb.start()
         time.sleep(4.0)
         tb.stop()
         tb.wait()
+        print(f"[HW TX] Done.")
 
-    def receive(self, timeout=15):
+    def receive(self, timeout=15) -> bytes:
+        """Listen for incoming LoRa packet. Returns bytes or b'' on timeout."""
+        print(f"[HW RX] Listening (timeout={timeout}s)...")
         tb = LoRaRXFlowgraph(self.rx_s)
         tb.start()
         start = time.time()
         while time.time() - start < timeout:
             res = tb.get_received_bytes()
-            if len(res) == PAYLOAD_LEN:
+            if len(res) > 0:
                 tb.stop()
                 tb.wait()
+                print(f"[HW RX] Received {len(res)} bytes.")
                 return res
             time.sleep(0.1)
         tb.stop()
         tb.wait()
+        print(f"[HW RX] Timeout.")
         return b''
 
 
