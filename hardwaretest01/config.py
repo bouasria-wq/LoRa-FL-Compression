@@ -5,4 +5,4 @@
 ROLE      = "server"
 HOME_ID   = None
 USRP_TYPE = "b200"
-USRP_IP   = "serial=32BBA90"
+USRP_IP   = None
