@@ -14,7 +14,6 @@ import numpy as np
 import sys
 import time
 import argparse
-import pickle
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / 'local_home'))
@@ -41,6 +40,7 @@ class HomeNode:
         print(f"\nHOME {self.home_id:02d} - ME-CFL HARDWARE VERSION")
         print(f"Error feedback: ON | Variance reduction: ON | Momentum: ON")
         print(f"Transport: Real LoRa over RF via USRP B200")
+        print(f"Payload size: {PAYLOAD_LEN} bytes (struct.pack)")
 
         self.trainer = LocalTrainer(
             home_id=home_id,
@@ -54,42 +54,35 @@ class HomeNode:
         )
         self.df_full = self.data_loader.load_home_data(home_id)
 
-        # Hardware radio
-        self.radio = get_home_radio()
-
+        self.radio       = get_home_radio()
         self.lora_bridge = HegazyLoRaBridge()
-        self.hegazy = AggregateGaussianMechanism(
-            n_clients=10,
-            sigma=0.1,
-            seed=home_id
+        self.hegazy      = AggregateGaussianMechanism(
+            n_clients=10, sigma=0.1, seed=home_id
         )
 
         # ME-CFL Eq 10: Momentum state
-        self.momentum  = None
-        self.beta      = 0.9
-        self.eta       = 0.01
+        self.momentum    = None
+        self.beta        = 0.9
+        self.eta         = 0.01
         self.prev_global = None
 
         self.daily_metrics = []
 
     def get_cumulative_data(self, day_num):
         df_cumulative = self.df_full.iloc[0:day_num * self.samples_per_day].copy()
-        temp_cols = ['T_indoor', 'T_outdoor']
-        for col in temp_cols:
+        for col in ['T_indoor', 'T_outdoor']:
             if col in df_cumulative.columns:
                 df_cumulative[col] = np.clip(
                     (df_cumulative[col] + 50.0) / 100.0, 0, 1
                 )
-        X_cum, y_cum = self.data_loader.get_features_target(df_cumulative)
-        return X_cum, y_cum
+        return self.data_loader.get_features_target(df_cumulative)
 
     def flatten_global(self, global_params):
         if isinstance(global_params, list):
             return np.concatenate([np.array(p).flatten() for p in global_params])
         elif isinstance(global_params, np.ndarray):
             return global_params.flatten()
-        else:
-            return np.array(global_params).flatten()
+        return np.array(global_params).flatten()
 
     def apply_momentum_update(self, local_params, global_flat):
         """ME-CFL Eq 10: Momentum update in Hilbert space."""
@@ -98,8 +91,7 @@ class HomeNode:
         if self.momentum is None:
             self.momentum = np.zeros_like(g_t)
         self.momentum = self.beta * self.momentum + (1 - self.beta) * g_t
-        updated_flat = local_flat - self.eta * self.momentum
-        return updated_flat
+        return local_flat - self.eta * self.momentum
 
     def train_on_day(self, day_num):
         print(f"\n--- HOME {self.home_id:02d} | DAY {day_num} | "
@@ -131,78 +123,61 @@ class HomeNode:
               f"Zeta_i: {zeta_i:.6f}")
 
         self.daily_metrics.append({
-            'day':      day_num,
-            'mae':      actual_mae,
-            'accuracy': accuracy,
-            'zeta_i':   zeta_i
+            'day': day_num, 'mae': actual_mae,
+            'accuracy': accuracy, 'zeta_i': zeta_i
         })
         return params
 
-    def transmit_via_lora(self, data_bytes: bytes) -> bool:
-        """
-        Transmit 49-byte compressed payload over real RF via USRP B200.
-        Uses gr_lora_hardware.LoRaHardware.transmit()
-        """
-        assert len(data_bytes) == PAYLOAD_LEN, \
-            f"Expected {PAYLOAD_LEN} bytes, got {len(data_bytes)}"
-
-        print(f"[HOME {self.home_id:02d}] TX compressed model over RF...")
-        self.radio.transmit(data_bytes)
+    def transmit_via_lora(self, payload: bytes) -> bool:
+        """Transmit struct.packed compressed model over RF via USRP B200."""
+        assert len(payload) == PAYLOAD_LEN, \
+            f"Expected {PAYLOAD_LEN} bytes, got {len(payload)}"
+        print(f"[HOME {self.home_id:02d}] TX {PAYLOAD_LEN} bytes over RF...")
+        self.radio.transmit(payload)
         print(f"[HOME {self.home_id:02d}] TX complete.")
         return True
 
     def wait_for_global_model(self, day_num, timeout=180):
-        """
-        Wait for global model broadcast from server via real RF RX.
-        Uses gr_lora_hardware.LoRaHardware.receive()
-        """
+        """Receive global model from server via RF RX."""
         print(f"[HOME {self.home_id:02d}] Waiting for global model (Day {day_num})...")
-
         raw = self.radio.receive(timeout=timeout)
 
         if len(raw) == PAYLOAD_LEN:
             try:
-                data = pickle.loads(
-                    self.lora_bridge.lora_ascii_to_binary(
-                        raw.decode('latin-1')
-                    )
-                )
+                data = self.lora_bridge.unpack_compressed(raw)
                 if data.get('day') == day_num:
-                    print(f"[HOME {self.home_id:02d}] Global model received for Day {day_num}.")
+                    print(f"[HOME {self.home_id:02d}] Global model received Day {day_num}.")
                     return data['params']
             except Exception as e:
-                print(f"[HOME {self.home_id:02d}] Failed to decode global model: {e}")
+                print(f"[HOME {self.home_id:02d}] Decode error: {e}")
         else:
             print(f"[HOME {self.home_id:02d}] No global model received (timeout).")
-
         return None
 
     def run_day(self, day_num):
-        # Train locally
         params = self.train_on_day(day_num)
 
         # ME-CFL Eq 7-8: Compress with error feedback
         a, b       = self.hegazy.decompose()
         compressed = self.hegazy.encode_parameters(params, self.home_id, a, b)
-        serialized = pickle.dumps(compressed)
 
-        # Transmit exactly 49 bytes over RF
-        self.transmit_via_lora(serialized[:PAYLOAD_LEN])
+        # Pack using struct instead of pickle — achieves real 238-byte payload
+        payload = self.lora_bridge.pack_compressed(compressed)
 
-        # Wait for global model from server via RF
+        # Transmit over RF
+        self.transmit_via_lora(payload)
+
+        # Wait for global model from server
         global_params = self.wait_for_global_model(day_num)
 
         if global_params is not None:
             global_flat = self.flatten_global(global_params)
-
-            # ME-CFL Eq 10: Apply momentum update
             if self.prev_global is not None:
                 updated_flat = self.apply_momentum_update(params, global_flat)
                 self.trainer.model.set_parameters(updated_flat)
                 print(f"[HOME {self.home_id:02d}] Momentum update applied (beta={self.beta})")
             else:
                 self.trainer.model.set_parameters(global_flat)
-
             self.prev_global = global_flat
 
         time.sleep(2)
@@ -226,7 +201,6 @@ def main():
     parser.add_argument('--days',    type=int, default=7)
     parser.add_argument('--epochs',  type=int, default=100)
     args = parser.parse_args()
-
     HomeNode(
         home_id=args.home_id,
         n_days=args.days,

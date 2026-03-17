@@ -5,6 +5,7 @@ GNU Radio LoRa Hardware Interface - hardwaretest02
 ===================================================
 Real over-the-air LoRa TX/RX using 2 USRP B200s.
 Matches master prompt specification exactly.
+PAYLOAD_LEN = 238 bytes (Hegazy struct.pack output)
 
 File: lora/gr_lora_hardware.py
 """
@@ -23,7 +24,7 @@ USRP_HOME_SERIAL   = "serial=PLACEHOLDER_HOME"
 USRP_SERVER_SERIAL = "serial=PLACEHOLDER_SERVER"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LoRa / RF parameters — from master prompt
+# LoRa / RF parameters
 # ─────────────────────────────────────────────────────────────────────────────
 SF              = 7
 BW              = 125000
@@ -32,7 +33,7 @@ CENTER_FREQ     = 915000000
 SAMP_RATE       = 1000000
 TX_GAIN         = 15
 RX_GAIN         = 15
-PAYLOAD_LEN     = 49
+PAYLOAD_LEN     = 238     # Hegazy struct.pack: 18 header + 55*2 m_k + 55*2 indices
 HAS_CRC         = True
 IMPL_HEAD       = False
 SYNC_WORD       = [0x12]
@@ -43,6 +44,9 @@ FRAME_ZERO_PADD = int(20 * 2**SF * SAMP_RATE / BW)
 class LoRaTXFlowgraph(gr.top_block):
     def __init__(self, payload: bytes, usrp_serial: str):
         gr.top_block.__init__(self, "LoRa HW TX")
+
+        assert len(payload) == PAYLOAD_LEN, \
+            f"Payload must be exactly {PAYLOAD_LEN} bytes, got {len(payload)}"
 
         self.uhd_usrp_sink = uhd.usrp_sink(
             usrp_serial,
@@ -87,7 +91,7 @@ class LoRaRXFlowgraph(gr.top_block):
         self.uhd_usrp_source.set_antenna('TX/RX', 0)
         self.uhd_usrp_source.set_gain(RX_GAIN, 0)
         self.uhd_usrp_source.set_min_output_buffer(
-            int(np.ceil(SAMP_RATE / BW * (2**SF + 2)))
+            int(np.ceil(SAMP_RATE / BW * (2**SF + 512)))
         )
 
         self.lora_rx = lora_sdr.lora_sdr_lora_rx(
@@ -120,7 +124,9 @@ class LoRaHardware:
         self.tx_s = tx_serial
         self.rx_s = rx_serial
 
-    def transmit(self, payload):
+    def transmit(self, payload: bytes):
+        assert len(payload) == PAYLOAD_LEN, \
+            f"Expected {PAYLOAD_LEN} bytes, got {len(payload)}"
         tb = LoRaTXFlowgraph(payload, self.tx_s)
         tb.start()
         time.sleep(4.0)
@@ -143,9 +149,6 @@ class LoRaHardware:
         return b''
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Factory functions
-# ─────────────────────────────────────────────────────────────────────────────
 def get_home_radio() -> LoRaHardware:
     return LoRaHardware(tx_serial=USRP_HOME_SERIAL, rx_serial=USRP_HOME_SERIAL)
 

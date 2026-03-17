@@ -1,9 +1,8 @@
 """
 Federated Server Aggregator - ME-CFL Hardware Version
 ======================================================
-Variance-reduced aggregation with global shift h^t
-and momentum-based model updates.
 Transport: Real LoRa over RF via USRP B200
+Payload: 238 bytes struct.pack (Hegazy compressed)
 
 File: server_aggregator.py
 """
@@ -11,7 +10,6 @@ import numpy as np
 import sys
 import time
 import argparse
-import pickle
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / 'compression'))
@@ -26,7 +24,7 @@ from gr_lora_hardware import get_server_radio, PAYLOAD_LEN
 
 class ServerAggregator:
 
-    def __init__(self, n_homes=10, n_days=7):
+    def __init__(self, n_homes=1, n_days=7):
         self.n_homes = n_homes
         self.n_days  = n_days
 
@@ -38,69 +36,56 @@ class ServerAggregator:
             eta=0.01
         )
         self.hegazy = AggregateGaussianMechanism(
-            n_clients=n_homes,
-            sigma=0.1
+            n_clients=n_homes, sigma=0.1
         )
-
-        # Hardware radio
         self.radio = get_server_radio()
 
         self.daily_results = []
 
         print("\n" + "="*50)
-        print("Federated Server Initialized - ME-CFL HARDWARE")
+        print("Federated Server - ME-CFL HARDWARE")
         print("="*50)
-        print(f"Parameters: 553")
-        print(f"Aggregation rate alpha: {self.server.alpha}")
-        print(f"Momentum beta: {self.server.beta}")
-        print(f"Learning rate eta: {self.server.eta}")
-        print(f"Number of clients: {n_homes}")
+        print(f"Clients: {n_homes} | Payload: {PAYLOAD_LEN} bytes (struct.pack)")
         print(f"Transport: Real LoRa over RF via USRP B200")
         print("="*50)
 
     def receive_from_home(self, home_id, day_num, timeout=180):
-        """
-        Receive compressed model from home node via real RF RX.
-        Uses gr_lora_hardware.LoRaHardware.receive()
-        """
+        """Receive struct.packed compressed model from home via RF RX."""
         print(f"[SERVER] Waiting for Home {home_id:02d} Day {day_num}...")
-
         raw = self.radio.receive(timeout=timeout)
 
         if len(raw) == PAYLOAD_LEN:
             try:
-                data = pickle.loads(
-                    self.lora_bridge.lora_ascii_to_binary(
-                        raw.decode('latin-1')
-                    )
-                )
+                data = self.lora_bridge.unpack_compressed(raw)
                 print(f"[SERVER] Received from Home {home_id:02d}.")
                 return data
             except Exception as e:
-                print(f"[SERVER] Failed to decode from Home {home_id:02d}: {e}")
+                print(f"[SERVER] Decode error from Home {home_id:02d}: {e}")
         else:
-            print(f"[SERVER] No data received from Home {home_id:02d} (timeout).")
-
+            print(f"[SERVER] No data from Home {home_id:02d} (timeout).")
         return None
 
     def broadcast_global_model(self, global_params, day_num):
-        """
-        Broadcast global model to home node via real RF TX.
-        Uses gr_lora_hardware.LoRaHardware.transmit()
-        """
-        print(f"[SERVER] Broadcasting global model for Day {day_num}...")
+        """Broadcast global model to home via RF TX using struct.pack."""
+        print(f"[SERVER] Broadcasting global model Day {day_num}...")
 
-        broadcast_data = {'day': day_num, 'params': global_params}
-        serialized = pickle.dumps(broadcast_data)
-        ascii_str  = self.lora_bridge.binary_to_lora_ascii(serialized)
+        # Pack global params for transmission
+        broadcast = {
+            'client_id':  0,
+            'm_k':        (global_params[:55] * 1000).astype(np.int16),
+            'dither':     np.zeros(55),
+            'indices':    np.arange(55, dtype=np.uint16),
+            'p_min':      np.float32(global_params.min()),
+            'scale':      np.float32(global_params.max() - global_params.min()),
+            'param_size': 553,
+            'zeta_i':     0.0,
+            'a':          float(day_num),   # encode day in 'a' field
+            'b':          0.0,
+        }
 
-        # Encode to bytes and trim to PAYLOAD_LEN
-        payload = ascii_str.encode('latin-1')[:PAYLOAD_LEN]
-        # Pad if needed
-        payload = payload.ljust(PAYLOAD_LEN, b'\x00')
-
+        payload = self.lora_bridge.pack_compressed(broadcast)
         self.radio.transmit(payload)
-        print(f"[SERVER] Global model broadcast complete for Day {day_num}.")
+        print(f"[SERVER] Broadcast complete Day {day_num}.")
 
     def run_day(self, day_num):
         print(f"\n{'='*50}")
@@ -110,34 +95,31 @@ class ServerAggregator:
         client_params_dict = {}
         zeta_values        = {}
 
-        # Since we only have 1 home USRP, receive once per day
         data = self.receive_from_home(home_id=1, day_num=day_num)
 
         if data is not None:
-            params = data.get('params')
-            if params is not None:
-                flat = np.concatenate([p.flatten() for p in params])
-                client_params_dict[1] = flat
-                zeta_values[1]        = data.get('zeta_i', 0.0)
+            # Decode parameters from compressed dict
+            decoded = self.hegazy.decode_parameters(data, data['a'], data['b'])
+            client_params_dict[1] = decoded
+            zeta_values[1]        = data.get('zeta_i', 0.0)
 
         if not client_params_dict:
-            print(f"[SERVER] No client updates received for Day {day_num}!")
+            print(f"[SERVER] No updates received Day {day_num}!")
             return
 
         # ME-CFL aggregation
         global_flat = self.server.aggregate_round(client_params_dict, day_num)
 
         if zeta_values:
-            avg_zeta = np.mean(list(zeta_values.values()))
-            print(f"[SERVER] Avg heterogeneous variance zeta: {avg_zeta:.6f}")
+            print(f"[SERVER] Avg zeta: {np.mean(list(zeta_values.values())):.6f}")
 
-        # Broadcast global model back to home via RF
+        # Broadcast back to home
         self.broadcast_global_model(global_flat, day_num)
 
         self.daily_results.append({
-            'day':           day_num,
+            'day':            day_num,
             'n_participants': len(client_params_dict),
-            'avg_zeta':      np.mean(list(zeta_values.values())) if zeta_values else 0.0
+            'avg_zeta':       np.mean(list(zeta_values.values())) if zeta_values else 0.0
         })
 
     def run(self):
@@ -148,8 +130,8 @@ class ServerAggregator:
         print("FINAL SERVER SUMMARY - ME-CFL HARDWARE")
         print("="*40)
         for r in self.daily_results:
-            print(f"Day {r['day']}: Aggregated {r['n_participants']} homes | "
-                  f"Avg Zeta: {r['avg_zeta']:.6f}")
+            print(f"Day {r['day']}: {r['n_participants']} homes | "
+                  f"Zeta: {r['avg_zeta']:.6f}")
         self.server.get_summary()
 
 
@@ -158,11 +140,7 @@ def main():
     parser.add_argument('--n_homes', type=int, default=1)
     parser.add_argument('--days',    type=int, default=7)
     args = parser.parse_args()
-
-    ServerAggregator(
-        n_homes=args.n_homes,
-        n_days=args.days
-    ).run()
+    ServerAggregator(n_homes=args.n_homes, n_days=args.days).run()
 
 
 if __name__ == "__main__":
