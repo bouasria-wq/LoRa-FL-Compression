@@ -2,25 +2,21 @@
 """
 GNU Radio LoRa USRP Bridge - hardwaretest10
 =============================================
-Uses Chen's lora_TX.py and lora_RX.py directly.
-Posts our compressed payload directly to the whitening block's
-message port using pmt.intern() — exactly as Chen's run_lora_transmitter.py.
+Uses:
+  - lora_TX_usrp.py: our TX flowgraph (file source -> LoRa PHY -> USRP)
+  - lora_RX_usrp.py: Chen's RX flowgraph (USRP -> LoRa PHY -> print)
 
-No file source. No patching. No grcc. Pure Python.
+No patching. No grcc. Clean Python files called directly.
+Flag-based handshake: home TX done -> server TX -> home done.
 
 File: lora/gr_lora_usrp.py
 """
 
 import sys
 import time
-import threading
+import subprocess
 import numpy as np
 from pathlib import Path
-
-try:
-    import pmt
-except ImportError:
-    from gnuradio import pmt
 
 # LoRa parameters
 SF             = 7
@@ -34,9 +30,9 @@ DEFAULT_TX_SERIAL = '32BBAD0'
 DEFAULT_RX_SERIAL = '32BBAD9'
 
 # Timing
-RX_INIT_TIME    = 3.0   # seconds for RX to initialize before TX sends
-TX_INTERVAL_S   = 0.001 # interval between character sends
-FLUSH_TIME      = 2.0   # time after last send for frame to flush
+RX_INIT_TIME    = 8
+TX_PROCESS_TIME = 15
+RX_EXTRA_TIME   = 5
 
 ASCII_CHARSET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
 
@@ -53,126 +49,129 @@ class GRCLoRaUSRP:
         self.tx_serial = tx_serial or DEFAULT_TX_SERIAL
         self.rx_serial = rx_serial or DEFAULT_RX_SERIAL
 
+        self.tx_input_file = self.work_dir / 'tx_payload.txt'
+        self.tx_script     = Path(__file__).parent / 'lora_TX_usrp.py'
+        self.rx_script     = Path(__file__).parent / 'lora_RX_usrp.py'
+
         self.total_transmissions      = 0
         self.successful_transmissions = 0
 
-        # Patch serials in Chen's lora_TX.py and lora_RX.py
-        self._patch_serials()
-
-        print(f"[USRP LoRa] Using Chen's lora_TX.py + lora_RX.py")
+        print(f"[USRP LoRa] TX flowgraph: {self.tx_script.name}")
+        print(f"[USRP LoRa] RX flowgraph: {self.rx_script.name}")
         print(f"[USRP LoRa] Role: {role}")
         print(f"[USRP LoRa] TX USRP serial: {self.tx_serial}")
         print(f"[USRP LoRa] RX USRP serial: {self.rx_serial}")
         print(f"[USRP LoRa] Work dir: {self.work_dir}")
         print(f"[USRP LoRa] Max payload: {LORA_MAX_BYTES} bytes")
 
-    def _patch_serials(self):
-        """Patch serial numbers in Chen's lora_TX.py and lora_RX.py."""
-        import re
-
-        tx_file = self.work_dir / 'lora_TX.py'
-        rx_file = self.work_dir / 'lora_RX.py'
-
-        if tx_file.exists():
-            code = tx_file.read_text()
-            # Replace any existing serial
-            code = re.sub(r'serial=[A-Za-z0-9]+', f'serial={self.tx_serial}', code)
-            # Replace IP address format
-            code = re.sub(r'"addr=192\.168\.\d+\.\d+"', f'"serial={self.tx_serial}"', code)
-            tx_file.write_text(code)
-            print(f"[USRP LoRa] lora_TX.py patched: serial={self.tx_serial}")
-
-        if rx_file.exists():
-            code = rx_file.read_text()
-            code = re.sub(r'serial=[A-Za-z0-9]+', f'serial={self.rx_serial}', code)
-            code = re.sub(r'"addr=192\.168\.\d+\.\d+"', f'"serial={self.rx_serial}"', code)
-            rx_file.write_text(code)
-            print(f"[USRP LoRa] lora_RX.py patched: serial={self.rx_serial}")
+    def _write_payload(self, payload: bytes):
+        ascii_payload = _bytes_to_ascii(payload)
+        with open(self.tx_input_file, 'w') as f:
+            f.write(ascii_payload + ',')
+        print(f"[USRP LoRa] Wrote: {len(payload)} bytes -> {len(ascii_payload)} ASCII chars")
 
     def transmit(self, payload: bytes, timeout=60) -> dict:
-        """
-        TX our compressed model payload using Chen's approach:
-        1. Start RX
-        2. Start TX with frame_period disabled
-        3. Post payload directly to whitening block message port
-        4. Collect RX output
-        """
         assert len(payload) <= LORA_MAX_BYTES
 
-        # Convert payload to ASCII string
-        ascii_payload = _bytes_to_ascii(payload)
-        print(f"[USRP LoRa] Payload: {len(payload)} bytes -> {len(ascii_payload)} ASCII chars")
+        self._write_payload(payload)
 
-        # Import Chen's flowgraphs from work_dir
-        sys.path.insert(0, str(self.work_dir))
+        if not self.tx_script.exists():
+            print(f"[USRP LoRa] ERROR: {self.tx_script} not found")
+            self.total_transmissions += 1
+            return self._make_result(False, payload)
+
+        if not self.rx_script.exists():
+            print(f"[USRP LoRa] ERROR: {self.rx_script} not found")
+            self.total_transmissions += 1
+            return self._make_result(False, payload)
+
+        print(f"[USRP LoRa] TX over the air (tx={self.tx_serial} rx={self.rx_serial})...")
 
         rx_msg = None
         crc_ok = False
+        rx_proc = None
+        tx_proc = None
 
         try:
-            from lora_TX import lora_TX as LoraTX
-            from lora_RX import lora_RX as LoraRX
-
-            # Start RX first
+            # Start RX FIRST
             print(f"[USRP LoRa] Starting RX (serial={self.rx_serial})...")
-            rx_tb = LoraRX()
-            rx_tb.start()
+            rx_proc = subprocess.Popen(
+                [sys.executable, str(self.rx_script),
+                 '--rx_serial', self.rx_serial],
+                cwd=str(self.work_dir),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
 
-            # Wait for RX to initialize
             print(f"[USRP LoRa] Waiting {RX_INIT_TIME}s for RX to initialize...")
             time.sleep(RX_INIT_TIME)
 
-            # Start TX with message strobe disabled (same as Chen's run_lora_transmitter.py)
+            # NOW start TX
             print(f"[USRP LoRa] Starting TX (serial={self.tx_serial})...")
-            tx_tb = LoraTX()
-            tx_tb.set_frame_period(10_000_000)  # disable default strobe
-            tx_tb.start()
+            tx_proc = subprocess.Popen(
+                [sys.executable, str(self.tx_script),
+                 '--input', str(self.tx_input_file),
+                 '--tx_serial', self.tx_serial],
+                cwd=str(self.work_dir),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
 
-            # Post our payload to whitening block message port
-            msg_port = pmt.intern("msg")
-            whitening_block = tx_tb.lora_sdr_whitening_0.to_basic_block()
-            whitening_block._post(msg_port, pmt.intern(ascii_payload))
-            print(f"[USRP LoRa] Posted payload to whitening block.")
-
-            # Wait for frame to flush
-            time.sleep(FLUSH_TIME)
-
-            # Collect RX output
-            # crc_verif block prints to stdout — capture via callback
-            time.sleep(1.0)
+            time.sleep(TX_PROCESS_TIME)
 
             # Stop TX
             try:
-                tx_tb.stop()
-                tx_tb.wait()
-            except Exception as e:
-                print(f"[USRP LoRa] TX stop: {e}")
+                tx_stdout, tx_stderr = tx_proc.communicate(input='\n', timeout=10)
+                if tx_stdout:
+                    for line in tx_stdout.strip().split('\n'):
+                        if line.strip():
+                            print(f"  [TX] {line.strip()}")
+                if tx_stderr:
+                    for line in tx_stderr.strip().split('\n'):
+                        if line.strip() and '[INFO]' not in line and '[WARNING]' not in line:
+                            print(f"  [TX ERR] {line.strip()}")
+            except subprocess.TimeoutExpired:
+                tx_proc.kill()
+                tx_proc.wait()
 
-            # Give RX a bit more time
-            time.sleep(2.0)
+            time.sleep(RX_EXTRA_TIME)
 
             # Stop RX
             try:
-                rx_tb.stop()
-                rx_tb.wait()
-            except Exception as e:
-                print(f"[USRP LoRa] RX stop: {e}")
+                rx_stdout, rx_stderr = rx_proc.communicate(input='\n', timeout=10)
+            except subprocess.TimeoutExpired:
+                rx_proc.kill()
+                rx_stdout, rx_stderr = rx_proc.communicate()
 
-            # For now mark success based on no errors
-            # The crc_verif block prints to stdout which we can't easily capture
-            # in-process — server file backup ensures model is delivered
-            success = True
-            crc_ok  = True
+            for output in [rx_stdout, rx_stderr]:
+                if not output:
+                    continue
+                for line in output.strip().split('\n'):
+                    if line.strip():
+                        print(f"  [RX] {line.strip()}")
+                    if 'rx msg:' in line:
+                        rx_msg = line.split('rx msg:')[1].strip()
+                    if 'CRC valid' in line:
+                        crc_ok = True
 
         except Exception as e:
             print(f"[USRP LoRa] Error: {e}")
+            for proc in [tx_proc, rx_proc]:
+                if proc:
+                    try:
+                        proc.kill()
+                        proc.wait()
+                    except:
+                        pass
             self.total_transmissions += 1
             return self._make_result(False, payload)
-        finally:
-            if str(self.work_dir) in sys.path:
-                sys.path.remove(str(self.work_dir))
 
         self.total_transmissions += 1
+        success = rx_msg is not None and crc_ok
         if success:
             self.successful_transmissions += 1
 
@@ -180,13 +179,14 @@ class GRCLoRaUSRP:
         t_toa = self._calculate_toa(len(payload))
 
         print(f"[USRP LoRa] Result: {'SUCCESS' if success else 'FAILED'} | "
+              f"CRC: {'OK' if crc_ok else 'FAIL'} | "
               f"ToA: {t_toa:.4f}s | PDR: {pdr*100:.1f}%")
 
         return {
             'success':     success,
             'crc_ok':      crc_ok,
             'tx_bytes':    len(payload),
-            'rx_msg':      ascii_payload,
+            'rx_msg':      rx_msg,
             't_toa':       t_toa,
             'pdr':         pdr,
             'packet_size': len(payload),

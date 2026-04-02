@@ -1,8 +1,7 @@
 """
 Home Node - ME-CFL USRP hardwaretest10
 =======================================
-Uses Chen's lora_TX.py + lora_RX.py directly via gr_lora_usrp.py.
-Posts compressed payload directly to whitening block message port.
+Uses lora_TX_usrp.py (file source) + lora_RX_usrp.py (Chen's RX).
 Flag-based handshake for clean TX/RX role switching.
 
 File: home_node.py
@@ -27,7 +26,8 @@ from gr_lora_usrp import get_home_radio, LORA_MAX_BYTES
 
 class HomeNode:
 
-    def __init__(self, home_id, n_days=7, epochs_per_day=100, tx_serial=None, rx_serial=None):
+    def __init__(self, home_id, n_days=7, epochs_per_day=100,
+                 tx_serial=None, rx_serial=None):
         self.home_id         = home_id
         self.n_days          = n_days
         self.epochs_per_day  = epochs_per_day
@@ -35,12 +35,14 @@ class HomeNode:
         self.lora_dir        = Path(__file__).parent / 'lora'
 
         print(f"\nHOME {self.home_id:02d} - ME-CFL USRP hardwaretest10")
-        print(f"Transport: REAL USRP B200 | Using Chen's lora_TX.py + lora_RX.py")
+        print(f"Error feedback: ON | Variance reduction: ON | Momentum: ON")
+        print(f"Transport: REAL USRP B200 | TX: file source flowgraph")
         print(f"Max payload: {LORA_MAX_BYTES} bytes")
 
-        self.trainer     = LocalTrainer(home_id=home_id, sequence_length=16, learning_rate=0.0005)
+        self.trainer = LocalTrainer(home_id=home_id, sequence_length=16, learning_rate=0.0005)
         self.data_loader = DataLoader(data_dir='data', n_homes=10, n_days=n_days)
-        self.df_full     = self.data_loader.load_home_data(home_id)
+        self.df_full = self.data_loader.load_home_data(home_id)
+
         self.radio       = get_home_radio(work_dir=str(self.lora_dir), tx_serial=tx_serial, rx_serial=rx_serial)
         self.lora_bridge = HegazyLoRaBridge()
         self.hegazy      = AggregateGaussianMechanism(n_clients=10, sigma=0.1, seed=home_id)
@@ -68,33 +70,43 @@ class HomeNode:
 
     def train_on_day(self, day_num):
         print(f"\n--- HOME {self.home_id:02d} | DAY {day_num} | {self.epochs_per_day} EPOCHS ---")
+
         X_cum, y_cum = self.get_cumulative_data(day_num)
         X_seq, y_seq = self.trainer.create_sequences(X_cum, y_cum)
-        self.trainer.model.model.fit(X_seq, y_seq, epochs=self.epochs_per_day,
-            batch_size=16, validation_split=0.1, shuffle=True, verbose=0)
-        metrics  = self.trainer.evaluate(X_seq, y_seq)
-        mae      = metrics['mae'] * 100.0
-        accuracy = metrics['accuracy']
-        params   = self.trainer.get_parameters()
-        zeta_i   = self.hegazy.measure_heterogeneous_variance(np.concatenate([p.flatten() for p in params]))
-        print(f"Result: MAE {mae:.4f}°C | Accuracy: {accuracy:.2f}% | Zeta_i: {zeta_i:.6f}")
-        self.daily_metrics.append({'day': day_num, 'mae': mae, 'accuracy': accuracy, 'zeta_i': zeta_i})
+
+        self.trainer.model.model.fit(
+            X_seq, y_seq, epochs=self.epochs_per_day,
+            batch_size=16, validation_split=0.1, shuffle=True, verbose=0
+        )
+
+        metrics    = self.trainer.evaluate(X_seq, y_seq)
+        actual_mae = metrics['mae'] * 100.0
+        temp_range = y_seq.max() - y_seq.min()
+        accuracy   = (1 - metrics['mae'] / temp_range) * 100 if temp_range > 0 else 0.0
+
+        params      = self.trainer.get_parameters()
+        params_flat = np.concatenate([p.flatten() for p in params])
+        zeta_i      = self.hegazy.measure_heterogeneous_variance(params_flat)
+
+        print(f"Result: MAE {actual_mae:.4f}°C | Accuracy: {accuracy:.2f}% | Zeta_i: {zeta_i:.6f}")
+        self.daily_metrics.append({'day': day_num, 'mae': actual_mae, 'accuracy': accuracy, 'zeta_i': zeta_i})
         return params
 
     def wait_for_server_tx_done(self, day_num, timeout=300):
         flag = self.lora_dir / f'server_tx_done_day{day_num}.flag'
-        print(f"[HOME {self.home_id:02d}] Waiting for server TX done...")
+        print(f"[HOME {self.home_id:02d}] Waiting for server TX done (Day {day_num})...")
         start = time.time()
         while time.time() - start < timeout:
             if flag.exists():
                 print(f"[HOME {self.home_id:02d}] Server TX done.")
                 return True
             time.sleep(1)
+        print(f"[HOME {self.home_id:02d}] Timeout waiting for server TX done.")
         return False
 
     def wait_for_global_model(self, day_num, timeout=120):
         global_file = self.lora_dir / f'global_model_day{day_num}.bin'
-        print(f"[HOME {self.home_id:02d}] Waiting for global model...")
+        print(f"[HOME {self.home_id:02d}] Waiting for global model (Day {day_num})...")
         start = time.time()
         while time.time() - start < timeout:
             if global_file.exists():
@@ -108,6 +120,7 @@ class HomeNode:
                 except Exception as e:
                     print(f"[HOME {self.home_id:02d}] Read error: {e}")
             time.sleep(2)
+        print(f"[HOME {self.home_id:02d}] Timeout waiting for global model.")
         return None
 
     def run_day(self, day_num):
@@ -128,19 +141,21 @@ class HomeNode:
         print(f"[HOME {self.home_id:02d}] TX {'SUCCESS' if result['success'] else 'FAILED'} | "
               f"ToA: {result['t_toa']:.4f}s | PDR: {result['pdr']*100:.1f}%")
 
-        # Signal home TX done
+        # Signal home TX done — server can now TX
         (self.lora_dir / f'home_tx_done_day{day_num}.flag').write_text("done")
+        print(f"[HOME {self.home_id:02d}] Home TX done flag written.")
 
-        # Wait for server TX done
+        # Wait for server TX done — then home can RX
         self.wait_for_server_tx_done(day_num)
 
-        # Get global model
+        # Get global model from file
         global_flat = self.wait_for_global_model(day_num)
+
         if global_flat is not None:
             if self.prev_global is not None:
                 updated_flat = self.apply_momentum_update(params, global_flat)
                 self.trainer.model.set_parameters(updated_flat)
-                print(f"[HOME {self.home_id:02d}] Momentum update applied.")
+                print(f"[HOME {self.home_id:02d}] Momentum update applied (beta={self.beta})")
             else:
                 self.trainer.model.set_parameters(global_flat)
             self.prev_global = global_flat
@@ -150,6 +165,7 @@ class HomeNode:
     def run(self):
         for d in range(1, self.n_days + 1):
             self.run_day(d)
+
         print("\n" + "="*50)
         print(f"FINAL HOME {self.home_id:02d} SUMMARY - hardwaretest10")
         print("="*50)
@@ -165,8 +181,10 @@ def main():
     parser.add_argument('--tx_serial', type=str, default=None)
     parser.add_argument('--rx_serial', type=str, default=None)
     args = parser.parse_args()
-    HomeNode(home_id=args.home_id, n_days=args.days, epochs_per_day=args.epochs,
-             tx_serial=args.tx_serial, rx_serial=args.rx_serial).run()
+    HomeNode(
+        home_id=args.home_id, n_days=args.days, epochs_per_day=args.epochs,
+        tx_serial=args.tx_serial, rx_serial=args.rx_serial,
+    ).run()
 
 
 if __name__ == "__main__":
