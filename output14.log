@@ -1,0 +1,265 @@
+nohup: ignoring input
+2026-04-07 11:15:21.616190: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+2026-04-07 11:15:22.450012: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+2026-04-07 11:15:24.856287: I external/local_xla/xla/tsl/cuda/cudart_stub.cc:31] Could not find cuda drivers on your machine, GPU will not be used.
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1775582127.141712 3537457 cuda_executor.cc:1309] INTERNAL: CUDA Runtime error: Failed call to cudaGetRuntimeVersion: Error loading CUDA libraries. GPU will not be used.: Error loading CUDA libraries. GPU will not be used.
+W0000 00:00:1775582127.151654 3537457 gpu_device.cc:2342] Cannot dlopen some GPU libraries. Please make sure the missing libraries mentioned above are installed properly if you would like to use GPU. Follow the guide at https://www.tensorflow.org/install/gpu for how to download and setup the required libraries for your platform.
+Skipping registering GPU devices...
+WARNING:tensorflow:5 out of the last 7 calls to <function TensorFlowTrainer.make_predict_function.<locals>.one_step_on_data_distributed at 0x724c0071b6a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+WARNING:tensorflow:6 out of the last 9 calls to <function TensorFlowTrainer.make_predict_function.<locals>.one_step_on_data_distributed at 0x724c0071b6a0> triggered tf.function retracing. Tracing is expensive and the excessive number of tracings could be due to (1) creating @tf.function repeatedly in a loop, (2) passing tensors with different shapes, (3) passing Python objects instead of tensors. For (1), please define your @tf.function outside of the loop. For (2), @tf.function has reduce_retracing=True option that can avoid unnecessary retracing. For (3), please refer to https://www.tensorflow.org/guide/function#controlling_retracing and https://www.tensorflow.org/api_docs/python/tf/function for  more details.
+
+============================================================
+SCENARIO: Case 1 — Compressed, perfect link, quant drift 1.5%
+============================================================
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Loaded Home 01: 672 samples (7 days @ 15-min intervals)
+Loaded Home 02: 672 samples (7 days @ 15-min intervals)
+Loaded Home 03: 672 samples (7 days @ 15-min intervals)
+Loaded Home 04: 672 samples (7 days @ 15-min intervals)
+Loaded Home 05: 672 samples (7 days @ 15-min intervals)
+Loaded Home 06: 672 samples (7 days @ 15-min intervals)
+Loaded Home 07: 672 samples (7 days @ 15-min intervals)
+Loaded Home 08: 672 samples (7 days @ 15-min intervals)
+Loaded Home 09: 672 samples (7 days @ 15-min intervals)
+Loaded Home 10: 672 samples (7 days @ 15-min intervals)
+
+  --- Day 1 ---
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 01 | MAE 3.070°C | Acc 81.47% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 02 | MAE 5.399°C | Acc 76.54% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 03 | MAE 2.383°C | Acc 90.66% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 04 | MAE 3.071°C | Acc 89.44% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 05 | MAE 3.294°C | Acc 84.81% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 06 | MAE 1.481°C | Acc 91.20% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 07 | MAE 4.721°C | Acc 77.27% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 08 | MAE 2.892°C | Acc 86.50% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 09 | MAE 2.323°C | Acc 89.71% | TX OK | 242 bytes (1 pkt)
+Error feedback initialized: 553 parameters
+Local shift initialized: 553 parameters
+    Home 10 | MAE 2.419°C | Acc 84.82% | TX OK | 242 bytes (1 pkt)
+Server initialized: 553 parameters
+Day 1: Aggregated 10/10 homes
+
+  --- Day 2 ---
+    Home 01 | MAE 1.691°C | Acc 92.02% | TX OK | 242 bytes (1 pkt)
+    Home 02 | MAE 2.125°C | Acc 91.92% | TX OK | 242 bytes (1 pkt)
+    Home 03 | MAE 1.881°C | Acc 92.63% | TX OK | 242 bytes (1 pkt)
+    Home 04 | MAE 2.323°C | Acc 92.01% | TX OK | 242 bytes (1 pkt)
+    Home 05 | MAE 1.936°C | Acc 91.07% | TX OK | 242 bytes (1 pkt)
+    Home 06 | MAE 1.858°C | Acc 90.39% | TX OK | 242 bytes (1 pkt)
+    Home 07 | MAE 2.504°C | Acc 90.16% | TX OK | 242 bytes (1 pkt)
+    Home 08 | MAE 2.045°C | Acc 91.09% | TX OK | 242 bytes (1 pkt)
+    Home 09 | MAE 1.927°C | Acc 91.89% | TX OK | 242 bytes (1 pkt)
+    Home 10 | MAE 2.108°C | Acc 91.08% | TX OK | 242 bytes (1 pkt)
+Day 2: Aggregated 10/10 homes
+
+  --- Day 3 ---
+    Home 01 | MAE 1.636°C | Acc 93.41% | TX OK | 242 bytes (1 pkt)
+    Home 02 | MAE 1.913°C | Acc 93.00% | TX OK | 242 bytes (1 pkt)
+    Home 03 | MAE 1.740°C | Acc 93.19% | TX OK | 242 bytes (1 pkt)
+    Home 04 | MAE 2.078°C | Acc 92.86% | TX OK | 242 bytes (1 pkt)
+    Home 05 | MAE 1.833°C | Acc 91.66% | TX OK | 242 bytes (1 pkt)
+    Home 06 | MAE 1.705°C | Acc 92.88% | TX OK | 242 bytes (1 pkt)
+    Home 07 | MAE 2.003°C | Acc 92.13% | TX OK | 242 bytes (1 pkt)
+    Home 08 | MAE 1.919°C | Acc 91.64% | TX OK | 242 bytes (1 pkt)
+    Home 09 | MAE 1.974°C | Acc 92.06% | TX OK | 242 bytes (1 pkt)
+    Home 10 | MAE 2.064°C | Acc 91.66% | TX OK | 242 bytes (1 pkt)
+Day 3: Aggregated 10/10 homes
+
+  --- Day 4 ---
+    Home 01 | MAE 1.414°C | Acc 94.30% | TX OK | 242 bytes (1 pkt)
+    Home 02 | MAE 1.239°C | Acc 95.55% | TX OK | 242 bytes (1 pkt)
+    Home 03 | MAE 1.641°C | Acc 93.57% | TX OK | 242 bytes (1 pkt)
+    Home 04 | MAE 0.521°C | Acc 98.21% | TX OK | 242 bytes (1 pkt)
+    Home 05 | MAE 0.861°C | Acc 96.72% | TX OK | 242 bytes (1 pkt)
+    Home 06 | MAE 1.522°C | Acc 94.46% | TX OK | 242 bytes (1 pkt)
+    Home 07 | MAE 0.597°C | Acc 97.86% | TX OK | 242 bytes (1 pkt)
+    Home 08 | MAE 0.763°C | Acc 97.17% | TX OK | 242 bytes (1 pkt)
+    Home 09 | MAE 1.634°C | Acc 94.51% | TX OK | 242 bytes (1 pkt)
+    Home 10 | MAE 1.447°C | Acc 94.16% | TX OK | 242 bytes (1 pkt)
+Day 4: Aggregated 10/10 homes
+
+  --- Day 5 ---
+    Home 01 | MAE 0.611°C | Acc 97.54% | TX OK | 242 bytes (1 pkt)
+    Home 02 | MAE 0.211°C | Acc 99.24% | TX OK | 242 bytes (1 pkt)
+    Home 03 | MAE 0.936°C | Acc 96.33% | TX OK | 242 bytes (1 pkt)
+    Home 04 | MAE 0.158°C | Acc 99.46% | TX OK | 242 bytes (1 pkt)
+    Home 05 | MAE 0.165°C | Acc 99.38% | TX OK | 242 bytes (1 pkt)
+    Home 06 | MAE 0.374°C | Acc 98.64% | TX OK | 242 bytes (1 pkt)
+    Home 07 | MAE 0.231°C | Acc 99.17% | TX OK | 242 bytes (1 pkt)
+    Home 08 | MAE 0.273°C | Acc 98.99% | TX OK | 242 bytes (1 pkt)
+    Home 09 | MAE 0.585°C | Acc 98.08% | TX OK | 242 bytes (1 pkt)
+    Home 10 | MAE 0.457°C | Acc 98.22% | TX OK | 242 bytes (1 pkt)
+Day 5: Aggregated 10/10 homes
+
+  --- Day 6 ---
+    Home 01 | MAE 0.262°C | Acc 98.94% | TX OK | 242 bytes (1 pkt)
+    Home 02 | MAE 0.228°C | Acc 99.23% | TX OK | 242 bytes (1 pkt)
+    Home 03 | MAE 0.247°C | Acc 99.03% | TX OK | 242 bytes (1 pkt)
+    Home 04 | MAE 0.096°C | Acc 99.67% | TX OK | 242 bytes (1 pkt)
+    Home 05 | MAE 0.279°C | Acc 98.98% | TX OK | 242 bytes (1 pkt)
+    Home 06 | MAE 0.214°C | Acc 99.22% | TX OK | 242 bytes (1 pkt)
+    Home 07 | MAE 0.071°C | Acc 99.74% | TX OK | 242 bytes (1 pkt)
+    Home 08 | MAE 0.162°C | Acc 99.40% | TX OK | 242 bytes (1 pkt)
+    Home 09 | MAE 0.245°C | Acc 99.19% | TX OK | 242 bytes (1 pkt)
+    Home 10 | MAE 0.158°C | Acc 99.39% | TX OK | 242 bytes (1 pkt)
+Day 6: Aggregated 10/10 homes
+
+  --- Day 7 ---
+    Home 01 | MAE 0.149°C | Acc 99.40% | TX OK | 242 bytes (1 pkt)
+    Home 02 | MAE 0.115°C | Acc 99.61% | TX OK | 242 bytes (1 pkt)
+    Home 03 | MAE 0.248°C | Acc 99.05% | TX OK | 242 bytes (1 pkt)
+    Home 04 | MAE 0.133°C | Acc 99.59% | TX OK | 242 bytes (1 pkt)
+    Home 05 | MAE 0.075°C | Acc 99.75% | TX OK | 242 bytes (1 pkt)
+    Home 06 | MAE 0.163°C | Acc 99.42% | TX OK | 242 bytes (1 pkt)
+    Home 07 | MAE 0.041°C | Acc 99.85% | TX OK | 242 bytes (1 pkt)
+    Home 08 | MAE 0.171°C | Acc 99.36% | TX OK | 242 bytes (1 pkt)
+    Home 09 | MAE 0.133°C | Acc 99.56% | TX OK | 242 bytes (1 pkt)
+    Home 10 | MAE 0.444°C | Acc 98.29% | TX OK | 242 bytes (1 pkt)
+Day 7: Aggregated 10/10 homes
+
+============================================================
+SCENARIO: Case 4 — Uncompressed, 1 packet (255 bytes), homes freeze on invalid global
+============================================================
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Model: 553 params (expected 553) — VERIFIED
+Loaded Home 01: 672 samples (7 days @ 15-min intervals)
+Loaded Home 02: 672 samples (7 days @ 15-min intervals)
+Loaded Home 03: 672 samples (7 days @ 15-min intervals)
+Loaded Home 04: 672 samples (7 days @ 15-min intervals)
+Loaded Home 05: 672 samples (7 days @ 15-min intervals)
+Loaded Home 06: 672 samples (7 days @ 15-min intervals)
+Loaded Home 07: 672 samples (7 days @ 15-min intervals)
+Loaded Home 08: 672 samples (7 days @ 15-min intervals)
+Loaded Home 09: 672 samples (7 days @ 15-min intervals)
+Loaded Home 10: 672 samples (7 days @ 15-min intervals)
+
+  --- Day 1 ---
+    Home 01 | MAE 1.872°C | Acc 88.70% | TX 63/553 params (11%) — TRUNCATED
+    Home 02 | MAE 4.205°C | Acc 81.73% | TX 63/553 params (11%) — TRUNCATED
+    Home 03 | MAE 2.110°C | Acc 91.73% | TX 63/553 params (11%) — TRUNCATED
+    Home 04 | MAE 3.210°C | Acc 88.96% | TX 63/553 params (11%) — TRUNCATED
+    Home 05 | MAE 2.533°C | Acc 88.32% | TX 63/553 params (11%) — TRUNCATED
+    Home 06 | MAE 1.833°C | Acc 89.11% | TX 63/553 params (11%) — TRUNCATED
+    Home 07 | MAE 2.202°C | Acc 89.40% | TX 63/553 params (11%) — TRUNCATED
+    Home 08 | MAE 2.527°C | Acc 88.20% | TX 63/553 params (11%) — TRUNCATED
+    Home 09 | MAE 2.666°C | Acc 88.19% | TX 63/553 params (11%) — TRUNCATED
+    Home 10 | MAE 2.163°C | Acc 86.42% | TX 63/553 params (11%) — TRUNCATED
+Server initialized: 553 parameters
+Day 1: Aggregated 10/10 homes
+  Global model completeness: 11.4% — INVALID — homes will freeze
+
+  --- Day 2 ---
+    Home 01 | FROZEN — no valid global model received
+    Home 02 | FROZEN — no valid global model received
+    Home 03 | FROZEN — no valid global model received
+    Home 04 | FROZEN — no valid global model received
+    Home 05 | FROZEN — no valid global model received
+    Home 06 | FROZEN — no valid global model received
+    Home 07 | FROZEN — no valid global model received
+    Home 08 | FROZEN — no valid global model received
+    Home 09 | FROZEN — no valid global model received
+    Home 10 | FROZEN — no valid global model received
+  Global model completeness: 11.4% — INVALID — homes will freeze
+
+  --- Day 3 ---
+    Home 01 | FROZEN — no valid global model received
+    Home 02 | FROZEN — no valid global model received
+    Home 03 | FROZEN — no valid global model received
+    Home 04 | FROZEN — no valid global model received
+    Home 05 | FROZEN — no valid global model received
+    Home 06 | FROZEN — no valid global model received
+    Home 07 | FROZEN — no valid global model received
+    Home 08 | FROZEN — no valid global model received
+    Home 09 | FROZEN — no valid global model received
+    Home 10 | FROZEN — no valid global model received
+  Global model completeness: 11.4% — INVALID — homes will freeze
+
+  --- Day 4 ---
+    Home 01 | FROZEN — no valid global model received
+    Home 02 | FROZEN — no valid global model received
+    Home 03 | FROZEN — no valid global model received
+    Home 04 | FROZEN — no valid global model received
+    Home 05 | FROZEN — no valid global model received
+    Home 06 | FROZEN — no valid global model received
+    Home 07 | FROZEN — no valid global model received
+    Home 08 | FROZEN — no valid global model received
+    Home 09 | FROZEN — no valid global model received
+    Home 10 | FROZEN — no valid global model received
+  Global model completeness: 11.4% — INVALID — homes will freeze
+
+  --- Day 5 ---
+    Home 01 | FROZEN — no valid global model received
+    Home 02 | FROZEN — no valid global model received
+    Home 03 | FROZEN — no valid global model received
+    Home 04 | FROZEN — no valid global model received
+    Home 05 | FROZEN — no valid global model received
+    Home 06 | FROZEN — no valid global model received
+    Home 07 | FROZEN — no valid global model received
+    Home 08 | FROZEN — no valid global model received
+    Home 09 | FROZEN — no valid global model received
+    Home 10 | FROZEN — no valid global model received
+  Global model completeness: 11.4% — INVALID — homes will freeze
+
+  --- Day 6 ---
+    Home 01 | FROZEN — no valid global model received
+    Home 02 | FROZEN — no valid global model received
+    Home 03 | FROZEN — no valid global model received
+    Home 04 | FROZEN — no valid global model received
+    Home 05 | FROZEN — no valid global model received
+    Home 06 | FROZEN — no valid global model received
+    Home 07 | FROZEN — no valid global model received
+    Home 08 | FROZEN — no valid global model received
+    Home 09 | FROZEN — no valid global model received
+    Home 10 | FROZEN — no valid global model received
+  Global model completeness: 11.4% — INVALID — homes will freeze
+
+  --- Day 7 ---
+    Home 01 | FROZEN — no valid global model received
+    Home 02 | FROZEN — no valid global model received
+    Home 03 | FROZEN — no valid global model received
+    Home 04 | FROZEN — no valid global model received
+    Home 05 | FROZEN — no valid global model received
+    Home 06 | FROZEN — no valid global model received
+    Home 07 | FROZEN — no valid global model received
+    Home 08 | FROZEN — no valid global model received
+    Home 09 | FROZEN — no valid global model received
+    Home 10 | FROZEN — no valid global model received
+  Global model completeness: 11.4% — INVALID — homes will freeze
+ERROR: LoRaFedComp_Fig1_results.csv not found — run full script first for cases 2 and 3
